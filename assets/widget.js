@@ -2289,6 +2289,8 @@ return {
   var toastTimer = 0
   var drag = null
   /** 用户打字的「仍在敲」窗口（ms）：宿主报 idle 时用它把状态临时扳成 working。 */
+  var paintError = ''
+  var painted = 0
   var typingUntil = 0
   var lastRealPress = 0
   var nextAutoPress = 0
@@ -2565,7 +2567,8 @@ return {
           scheduleFrame()
         })
       })
-      .catch(function () {
+      .catch(function (err) {
+        window.__dshPetError = 'load: ' + String((err && err.stack) || err).slice(0, 400)
         showToast('皮肤加载失败')
       })
   }
@@ -2734,7 +2737,12 @@ return {
       eng.notes.update(nowSec, audioActive)
       eng.status.update(nowSec, eng.machine.state)
       draw(pose, nowSec)
-    } catch (err) {}
+      paintError = ''
+    } catch (err) {
+      // 以前这里是空 catch：画不出来时页面上什么线索都没有。留一条给探针读。
+      paintError = String((err && err.stack) || err).slice(0, 400)
+      if (window.__dshPetError !== paintError) window.__dshPetError = paintError
+    }
     scheduleFrame()
   }
 
@@ -2765,6 +2773,7 @@ return {
   }
 
   function draw(pose, nowSec) {
+    painted += 1
     var P = load()
     var R = P.render
     var frame = eng.frame
@@ -2784,9 +2793,19 @@ return {
       eng.notes.draw(frame, head, noteTex, nowSec)
     }
     var rgba = R.toImageData(frame)
+    if (!c2d) {
+      paintError = 'no 2d context'
+      return
+    }
     try {
-      c2d.putImageData(new ImageData(rgba, W, H), 0, 0)
-    } catch (err) {}
+      // 不用 `new ImageData(...)`：某些 Chromium 版本对「数组 + 宽高」构造的参数校验更严，
+      // 而 createImageData + set 在任何版本上都成立，代价是一次 585 KB 的拷贝。
+      var img = c2d.createImageData(W, H)
+      img.data.set(rgba)
+      c2d.putImageData(img, 0, 0)
+    } catch (err) {
+      paintError = 'putImageData: ' + String((err && err.message) || err).slice(0, 300)
+    }
   }
 
   // ---------------------------------------------------------------- 交互
@@ -2979,6 +2998,15 @@ return {
         deco: opts.deco,
         scale: opts.scale,
         flip: opts.flip,
+        frames: painted,
+        error: paintError || window.__dshPetError || '',
+        // 帧缓冲里到底有没有东西：区分「渲染没出像素」和「出了像素但没上屏」
+        frameOpaque: (function () {
+          var px = eng.frame.pixels
+          var n = 0
+          for (var i = 3; i < px.length; i += 4) if (px[i] > 0) n++
+          return n
+        })(),
       }
     }
   }

@@ -190,7 +190,11 @@ const server = http.createServer((req, res) => {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
       return res.end('not found: ' + rel)
     }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream' })
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
+      // 开发期必须关缓存：改了 widget.js 之后 Ctrl+F5 要能立刻看到
+      'Cache-Control': 'no-store',
+    })
     res.end(bytes)
   })
 })

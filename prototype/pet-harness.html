@@ -37,6 +37,7 @@
     try {
       var s = window.__dshPetState ? window.__dshPetState() : null
       rows.push('engine=' + (s ? JSON.stringify(s) : 'none'))
+    if (window.__dshPetError) rows.push('ERROR=' + window.__dshPetError)
     } catch (e) {
       rows.push('engine read fail')
     }
@@ -66,6 +67,14 @@
     out.textContent = probeLog.join(' ⏎ ')
   }
   ;[1200, 2600, 4200, 6000].forEach(function (t) { setTimeout(probe, t) })
+  // 顺带验一次 API 通路：挂件拿不到数据时气泡会显示 --
+  setTimeout(function () {
+    fetch('/pet/balance.json').then(function (r) { return r.json() }).then(function (d) {
+      document.getElementById('probe').textContent += ' ⏎ api balance=' + JSON.stringify(d)
+    }).catch(function (e) {
+      document.getElementById('probe').textContent += ' ⏎ api balance FAIL ' + e.message
+    })
+  }, 5000)
   // 模拟真实打字：keydown → animator.press()（打字动画与手势打断的接线验证）
   ;[1800, 2050, 2300, 2550].forEach(function (t) {
     setTimeout(function () {
