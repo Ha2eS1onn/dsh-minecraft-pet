@@ -25219,11 +25219,19 @@ function petTick(nowMs) {
   petTimer = 0
   var eng = petEngine
   if (!eng) return
+  // 统一时间源：状态机的 force/request 用 performance.now()，这里如果用 rAF 回调的
+  // 时间戳，在虚拟时间/后台节流下两者可能差出几百毫秒，姿态过渡会算成 t<0 卡在 from。
+  nowMs = performance.now()
   try {
     var dt = eng.lastMs ? Math.min(0.1, (nowMs - eng.lastMs) / 1000) : 1 / 60
     eng.lastMs = nowMs
     var nowSec = nowMs / 1000
     eng.machine.tick(nowMs)
+    // 打字结束（停手 2s）回宿主状态
+    if (petTypingUntil && nowMs > petTypingUntil) {
+      petTypingUntil = 0
+      if (eng.machine.state === 'working' && petHostState === 'idle') eng.machine.force('idle', nowMs)
+    }
     // working 时「一直在敲键盘」：真实按键优先；安静超过 1.2s 就自己按节拍敲。
     // 只靠真实按键的话，人打字间隔 0.2~0.5s、按压只有 0.15s 行程约 1.5 模型单位
     // （挂件缩放后约 5 屏幕像素），观感就是「坐着不动」（用户实测反馈）。
@@ -25252,6 +25260,9 @@ function petTick(nowMs) {
 
 // 状态 → 姿态：与 img 后端共用 pollWaitState 的 1 秒周期，零新增定时器（plan.md §1）
 var petPendingState = ''
+// 打字联动：最近一次按键后的「仍在打字」窗口（毫秒）与宿主最后上报的状态
+var petTypingUntil = 0
+var petHostState = 'idle'
 function petApplyState(name) {
   var eng = petEngine
   if (!eng) return
@@ -25260,6 +25271,14 @@ function petApplyState(name) {
     if (['idle', 'thinking', 'working', 'waiting', 'done', 'error'].indexOf(st) < 0) st = 'idle'
     var nowMs = performance.now()
     var mine = eng.machine
+    petHostState = st
+    // 打字联动：宿主报 idle 但用户正在敲键盘 → 先按 working 演（坐着敲），停手 2s 后自动回 idle。
+    // 宿主报 thinking / waiting / done 等状态时一律以宿主为准，不抢。
+    if (st === 'idle' && nowMs < petTypingUntil) {
+      if (mine.state !== 'working') { mine.force('working', nowMs); petSchedule() }
+      petPendingState = ''
+      return
+    }
     if (mine.request(st, nowMs)) { petPendingState = ''; petSchedule(); return }
     if (st === mine.state) { petPendingState = ''; return }
     // request 被拒有三种原因：终结态锁定 / 最短停留未满 / 优先级不降级。
@@ -25314,7 +25333,13 @@ try {
     var eng = petEngine
     if (!eng) return
     try {
-      var nowSec = performance.now() / 1000
+      var nowMs = performance.now()
+      var nowSec = nowMs / 1000
+      // 打字联动：宿主 idle 时一敲键盘立刻进 working（不等 1s 轮询），停手 2s 回 idle
+      petTypingUntil = nowMs + 2000
+      if (eng.machine.state !== 'working' && petHostState === 'idle') {
+        eng.machine.force('working', nowMs)
+      }
       eng.lastRealPress = nowSec
       eng.nextAutoPress = nowSec + 0.18
       eng.anim.press(nowSec)

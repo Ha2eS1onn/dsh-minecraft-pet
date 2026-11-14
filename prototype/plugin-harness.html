@@ -22,7 +22,9 @@
 <pre id="probe" style="padding:16px;color:#7ad">waiting for widget…</pre>
 <script src="../assets/whale-widget.js"></script>
 <script>
-  // 探针：把 skin 画布的非透明像素与尺寸写进 #probe，供 --dump-dom 抓取
+  // 探针：把 skin 画布的非透明像素与尺寸写进 #probe，供 --dump-dom 抓取。
+  // 多次采样累积（用 ⏎ 分隔），否则只有最后一次能留下——打字联动要看到「中间工作、末尾空闲」。
+  var probeLog = []
   function probe() {
     var c = document.querySelector('canvas.dshwv-canvas')
     var out = document.getElementById('probe')
@@ -54,10 +56,11 @@
       for (var i = 0; i < d.length; i += 4) { h = (h * 16777619 ^ (d[i] << 16 ^ d[i + 1] << 8 ^ d[i + 2] ^ d[i + 3])) >>> 0 }
       rows.push('hash=' + h.toString(16))
     } catch (e) { rows.push('read fail: ' + e.message) }
-    out.textContent = rows.join(' | ')
+    probeLog.push(rows.join(' | '))
+    out.textContent = probeLog.join(' ⏎ ')
   }
   setTimeout(probe, 1500)
-  setTimeout(probe, 3000)
+  setTimeout(probe, 3200)
   setTimeout(probe, 8000)
   // 模拟真实打字：keydown → animator.press()（M4 的接线验证）
   ;[1800, 2100, 2400, 2700, 3000].forEach(function (t) {
