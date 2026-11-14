@@ -1480,6 +1480,8 @@ class PetAnimator {
   constructor(now = 0, { seed = Math.random() } = {}) {
     this.breath = 0
     this.blinkPhase = seed * Math.PI * 2
+    /** 头部跟随权重：只有 idle 且无待机手势时趋向 1，其余情况平滑收回 0。 */
+    this.trackW = 0
     /** 打字按压状态，照 MDP 的 `Hand { until, key }`：until 之前该手压在键位上。 */
     this.hands = [
       { until: 0, key: null },
@@ -1533,7 +1535,7 @@ class PetAnimator {
     this._breath(p, s, now, dt)
     this.eyelid = this._blink(s, now)
     p.eyelid = this.eyelid
-    this._trackHead(p, ctx, s)
+    this._trackHead(p, ctx, s, now, dt)
     if (p.sit > 0.001) this._typing(p, ctx, s, now, dt)
     else this._resetTyping()
     // 状态专属动画（thinking 挠头 / waiting 跳两下 / done 举手后鼓掌）。
@@ -1585,17 +1587,33 @@ class PetAnimator {
     return 1 - blinkClosure(now * BLINK_RATE + this.blinkPhase)
   }
 
-  /** 头部跟随：把光标位置反算成朝向，再乘父级逆矩阵进头部局部空间。 */
-  _trackHead(p, ctx, s) {
-    if (!s.track || !ctx.cursor) return
+  /** 头部跟随：把光标位置反算成朝向，再乘父级逆矩阵进头部局部空间。
+   *
+   *  跟随是**有条件的**：只有 `idle` 且没有待机手势时才发生（plan.md §6.3 里
+   *  thinking 的「弱跟随」也不要——状态姿态要稳定可辨）。进入手势或别的状态时
+   *  用 `trackW` 把角度平滑收回到中立，手势 / 状态结束后再平滑恢复，
+   *  所以不是「一进手势就瞬跳回正」。 */
+  _trackHead(p, ctx, s, now, dt) {
+    const d = Math.max(dt || 0, 0)
+    // 光标不在画布上：直接回中立（这条不需要过渡，否则指针一离开就残留偏角）
+    if (!ctx.cursor) { this.trackW = 0; return }
+    // ctx.state 缺省时按 idle 处理（老调用点不传状态，语义上就是"默认状态"）
+    const idle = ctx.state == null || ctx.state === 'idle'
+    const want = (s.track && idle && !this.gestureBusy) ? 1 : 0
+    this.trackW += (want - this.trackW) * (1 - Math.exp(-d / 0.12))
+    if (this.trackW < 1e-3) this.trackW = 0
+    if (this.trackW === 0) return
+
     const W = ctx.width
     const H = ctx.height
+    // 光标离开画布时按画面中上区域算目标，保证 trackW 衰减期间角度是「收回中立」而不是乱指
+    const cur = ctx.cursor || { x: W / 2, y: H * 0.36 }
     const neck = transformPoint(torsoSpace(p), [0, 12, 0])
     const ahead = Q.rotate(VIEW, [0, 3, 0])
     const pt = project([neck[0] + ahead[0], neck[1] + ahead[1], neck[2] + ahead[2]], W, H)
 
-    const dx = (ctx.cursor.x - pt[0]) / Math.max(W * 0.8, 200)
-    const dy = (ctx.cursor.y - pt[1]) / Math.max(H * 0.65, 180)
+    const dx = (cur.x - pt[0]) / Math.max(W * 0.8, 200)
+    const dy = (cur.y - pt[1]) / Math.max(H * 0.65, 180)
     const x = clamp(
       Math.atan(dx * 0.3 * s.sensX),
       -s.rangeX * DEG,
@@ -1606,8 +1624,9 @@ class PetAnimator {
       -s.rangeY * DEG,
       s.rangeY * DEG,
     )
-    const horizontal = clamp(x, -Math.PI / 2, Math.PI / 2)
-    const vertical = clamp(y, -85 * DEG, 85 * DEG)
+    // 权重乘在角度上：trackW=0 时目标是严格中立，与状态姿态的 head_rotation 一致
+    const horizontal = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
+    const vertical = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
 
     const desired = Q.multiply(
       Q.multiply(
@@ -2765,7 +2784,7 @@ function frameSvgClean(code) {
 }
 
 var css = [
-  '.dshwv-root{position:fixed;right:0;bottom:0;--dshw-scale:1;--dshw-base:clamp(122px,calc(min(250px,min(100vw,100vh) * 0.28) * var(--dshw-scale)),625px);width:var(--dshw-base);height:var(--dshw-base);pointer-events:none;user-select:none;-webkit-user-select:none;z-index:9999;font-family:inherit;transition:left .16s ease,top .16s ease}',
+  '.dshwv-root{position:fixed;right:0;bottom:0;--dshw-scale:1;--dshw-base:clamp(160px,calc(min(360px,min(100vw,100vh) * 0.40) * var(--dshw-scale)),900px);width:var(--dshw-base);height:var(--dshw-base);pointer-events:none;user-select:none;-webkit-user-select:none;z-index:9999;font-family:inherit;transition:left .16s ease,top .16s ease}',
   // v634 移动端:去掉浏览器「点击高亮」方块——它画在可点元素的矩形包围盒上,
   // 泡泡的内联 SVG 形状尤其明显;同时禁掉 iOS 长按系统菜单/放大镜。
   // 只作用于挂件自身的 dshwv- 元素(该属性可继承,后代一并覆盖),不影响 DSH 页面自身的高亮。

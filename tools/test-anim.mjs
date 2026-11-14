@@ -86,7 +86,13 @@ const CAM_VIEW = Q.multiply(Q.rotY(Math.atan2(30, 70)), Q.rotX(-Math.atan(23 / M
 // 3) 头部跟随
 {
   const anim = new PetAnimator(0)
-  const at = (x, y) => anim.update(targetPose('idle'), ctx({ track: true }, { x, y }), 0, 1 / 60)
+  // 2026-11-14：头部跟随改成有条件 + 渐入（只有 idle、无待机手势才跟），
+  // 采样前先跑 20 帧让 trackW 收敛到 1，否则单帧采样量到的是 12% 的权重。
+  const at = (x, y) => {
+    let p = anim.update(targetPose('idle'), ctx({ track: true }, { x, y }), 0, 1 / 60)
+    for (let i = 0; i < 20; i += 1) p = anim.update(targetPose('idle'), ctx({ track: true }, { x, y }), 0, 1 / 60)
+    return p
+  }
   // 脖子投影点：光标放这里才是「正对摄像机」；画布中心在它下方，会低头看
   const neutral = (() => {
     const neck = transformPoint(torsoSpace(targetPose('idle')), [0, 12, 0])
@@ -120,6 +126,28 @@ const CAM_VIEW = Q.multiply(Q.rotY(Math.atan2(30, 70)), Q.rotX(-Math.atan(23 / M
   check('光标上移与下移朝向不同', dotAngle(up.head_rotation, down.head_rotation) > 0.2, dotAngle(up.head_rotation, down.head_rotation).toFixed(3))
   check('跟随改变了画面', renderHash(right) !== renderHash(center))
   check('无光标时不跟随', renderHash(anim.update(targetPose('idle'), ctx({ track: true }), 0, 1 / 60)) === 'c2c43ab4')
+
+  // 待机手势：所有角度回正，结束后恢复（2026-11-14 用户要求）
+  {
+    const steady = at(W * 0.95, neutral.y)
+    anim.gestures.trigger('tilt', 0)
+    let t = 0.2
+    let during = steady
+    for (let i = 0; i < 60; i += 1) {
+      during = anim.update(targetPose('idle'), ctx({ track: true }, { x: W * 0.95, y: neutral.y }), t, 1 / 60)
+      t += 1 / 60
+    }
+    // 回正的判据是「跟随权重归零」而不是 head_rotation === identity：
+    // tilt 本身就会歪头（那 0.3 rad 是手势动作，不是跟随残留）。
+    check('手势进行中跟随权重归零（角度回正）', anim.trackW === 0, `trackW=${anim.trackW.toFixed(4)}`)
+    // tilt 时长 2.4s + 回位 0.16s，再跑 4 秒必然结束后回到跟随
+    for (let i = 0; i < 240; i += 1) {
+      during = anim.update(targetPose('idle'), ctx({ track: true }, { x: W * 0.95, y: neutral.y }), t, 1 / 60)
+      t += 1 / 60
+    }
+    const back = dotAngle(during.head_rotation, steady.head_rotation)
+    check('手势结束后跟随角恢复', back < 0.15, `与手势前差 ${back.toFixed(3)} rad`)
+  }
 }
 
 // 4) 打字（MDP 结构：按键事件驱动、按压 0.15s、无按键时双手悬停）
