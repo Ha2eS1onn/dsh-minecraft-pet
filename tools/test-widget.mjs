@@ -96,7 +96,13 @@ check('不引用旧挂件文件 whale-widget.js', src.indexOf('whale-widget.js')
 check('不引用 DWS 立绘素材 DSniang', src.indexOf('DSniang') < 0)
 check('挂载前先判 composer（data-composer-input）', shell.indexOf('[data-composer-input]') >= 0)
 check('单像素 alpha 命中检测在位', shell.indexOf('frame.pixels[') >= 0 && shell.indexOf('> 8') >= 0)
-check('帧需求分级：眨眼 / 跟随 / 拖动 → 60fps', shell.indexOf('eyelid < 0.999') >= 0 && shell.indexOf('cursorAt < 260') >= 0 && shell.indexOf('if (drag) return 2') >= 0)
+check(
+  '帧需求分级：眨眼 / 跟随 / 拖动 → 60fps',
+  shell.indexOf('eyelid < 0.95') >= 0 && shell.indexOf('cursorAt < 260') >= 0 && shell.indexOf('if (drag) return 2') >= 0
+)
+// 144Hz 屏上 rAF 会把绘制带到 144 次/秒，必须有目标间隔门控
+check('绘制按目标间隔门控（不跟显示器刷新率跑）', shell.indexOf('var targetMs = demand() >= 2 ? 16 : IDLE_FRAME_MS') >= 0 && shell.indexOf('if (nowMs - lastDrawAt < targetMs - 2)') >= 0)
+check('探针能读到实测帧率 fps', shell.indexOf('fps: fps') >= 0)
 check('idle 走 33ms（30fps）', shell.indexOf('IDLE_FRAME_MS = 33') >= 0)
 check('穿透状态下留了恢复入口', shell.indexOf('dshmp-resume') >= 0)
 check('有自检钩子 __dshPetState', shell.indexOf('window.__dshPetState') >= 0)

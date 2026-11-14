@@ -2291,6 +2291,10 @@ return {
   /** 用户打字的「仍在敲」窗口（ms）：宿主报 idle 时用它把状态临时扳成 working。 */
   var paintError = ''
   var painted = 0
+  var lastDrawAt = 0
+  var fpsWindowAt = 0
+  var fpsCount = 0
+  var fps = 0
   var typingUntil = 0
   var lastRealPress = 0
   var nextAutoPress = 0
@@ -2702,7 +2706,9 @@ return {
     if (!eng) return 0
     if (eng.notes.active || eng.status.active) return 2
     if (eng.anim.gestureBusy) return 2
-    if (eng.anim.eyelid < 0.999) return 2
+    // 阈值故意留宽：blinkClosure 的尾巴很长，eyelid 几乎总是 0.999x，
+    // 用 0.999 判断等于「永远 60fps」。0.95 覆盖真正看得见闭合的那一段。
+    if (eng.anim.eyelid < 0.95) return 2
     if (performance.now() - cursorAt < 260) return 2
     if (drag) return 2
     if (hostState !== 'idle') return 2
@@ -2726,6 +2732,14 @@ return {
   function tick(nowMs) {
     frameTimer = 0
     if (!eng) return
+    // rAF 的节奏等于显示器刷新率，144/165Hz 屏上会被带着画 144 次/秒（单帧 4.4ms ⇒ 63% 单核）。
+    // 这里按目标间隔门控：动效 60fps、idle 30fps，超出的帧只续下一帧、不重绘。
+    var targetMs = demand() >= 2 ? 16 : IDLE_FRAME_MS
+    if (nowMs - lastDrawAt < targetMs - 2) {
+      scheduleFrame()
+      return
+    }
+    lastDrawAt = nowMs
     try {
       var nowSec = nowMs / 1000
       var dt = eng.lastMs ? Math.min(0.05, (nowMs - eng.lastMs) / 1000) : 0.016
@@ -2742,6 +2756,12 @@ return {
       eng.status.update(nowSec, eng.machine.state)
       draw(pose, nowSec)
       paintError = ''
+      fpsCount += 1
+      if (nowMs - fpsWindowAt >= 1000) {
+        fps = Math.round((fpsCount * 1000) / (nowMs - fpsWindowAt))
+        fpsWindowAt = nowMs
+        fpsCount = 0
+      }
     } catch (err) {
       // 以前这里是空 catch：画不出来时页面上什么线索都没有。留一条给探针读。
       paintError = String((err && err.stack) || err).slice(0, 400)
@@ -3003,6 +3023,7 @@ return {
         scale: opts.scale,
         flip: opts.flip,
         frames: painted,
+        fps: fps,
         error: paintError || window.__dshPetError || '',
         // 帧缓冲里到底有没有东西：区分「渲染没出像素」和「出了像素但没上屏」
         frameOpaque: (function () {
