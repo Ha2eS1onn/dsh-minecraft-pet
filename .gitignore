@@ -27,3 +27,7 @@ node_modules/
 *.bak2
 *.bak-devpaths
 _patch_*.patch
+
+# 验具临时产物（headless 探针输出）
+prototype/harness-*.txt
+prototype/_edge_*.txt
