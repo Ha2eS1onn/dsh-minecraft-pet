@@ -25060,6 +25060,8 @@ var petEngine = null
 var petTimer = 0
 var petTimerRaf = false
 var petCursor = null
+/** 最近一次 mousemove 的时刻（ms）。头部跟随要跟手，15fps 会明显拖尾。 */
+var petCursorAt = 0
 var petAudioActive = false
 var petNoteTex = null
 var petHeartTex = null
@@ -25109,6 +25111,12 @@ function petDemandOf(eng) {
     if (eng.notes && eng.notes.active) return 2
     if (eng.status && eng.status.active) return 2
     if (eng.anim && eng.anim.gestureBusy) return 2
+    // 眨眼进行中：闭眼段只有约 0.1s（blinkClosure），30fps 只采到 2~3 帧、更低的帧率
+    // 会直接漏掉整次眨眼。上一帧的 eyelid 是现成的信号，不必预判下一次眨眼。
+    if (eng.anim && eng.anim.eyelid < 0.999) return 2
+    // 鼠标在动 / 正在拖动：头部跟随与位移都要跟手（260ms 是手感阈值，不是技术限制）。
+    if (performance.now() - petCursorAt < 260) return 2
+    try { if (root.classList.contains('dshwv-dragging')) return 2 } catch (err) {}
     if (eng.machine && eng.machine.state !== 'idle') return 2
     return 1
   } catch (err) { return 1 }
@@ -25120,9 +25128,11 @@ function petSchedule() {
     petTimerRaf = true
     petTimer = requestAnimationFrame(petTick)
   } else {
-    // idle 只需呼吸与眨眼：15fps 足够，静止期 CPU 接近 0（plan.md §14.5）
+    // 纯 idle（只剩呼吸）：30fps。单帧实测 4.4 ms（tools/bench-frame.mjs），
+    // 60fps 常驻要吃掉 ~26% 单核，而呼吸是 4s 周期慢动作，30fps 肉眼无差别。
+    // 眨眼 / 跟随 / 拖动 / 非 idle 一律走上面的 rAF 分支拿 60fps。
     petTimerRaf = false
-    petTimer = setTimeout(function () { petTick(performance.now()) }, 66)
+    petTimer = setTimeout(function () { petTick(performance.now()) }, 33)
   }
 }
 
@@ -25333,6 +25343,8 @@ try {
         x: (e.clientX - r.left) / r.width * PET_W,
         y: (e.clientY - r.top) / r.height * PET_H,
       }
+      petCursorAt = performance.now()
+      petSchedule()
     } catch (err) {}
   }, true)
 } catch (err) {}

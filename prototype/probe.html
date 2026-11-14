@@ -36,6 +36,9 @@
       }
 
       const img = new Image()
+      const q2 = new URLSearchParams(location.search)
+      const bench = q2.get('bench') === '1'
+      const benchFrames = Number(q2.get('frames') || 120)
       img.onload = () => {
         try {
           const c = document.createElement('canvas')
@@ -45,6 +48,31 @@
           cx.drawImage(img, 0, 0)
           const { data } = cx.getImageData(0, 0, c.width, c.height)
           const skin = skinFromImage({ width: c.width, height: c.height, data })
+
+          // bench 模式：量「每帧 buildParts + drawParts」的真实浏览器耗时，
+          // 用来判断能不能把 idle 基线提到 60fps（plan.md §11.2 预算 < 6 ms）。
+          if (bench) {
+            const frame = createFrame(W, H)
+            const times = []
+            for (let i = 0; i < benchFrames; i++) {
+              const t0 = performance.now()
+              clearFrame(frame)
+              drawParts(frame, staticParts(skin, { outer: true, armWidth: slim ? 3 : 4 }), skin)
+              times.push(performance.now() - t0)
+            }
+            const sorted = [...times].sort((a, b) => a - b)
+            const pct = (p) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]
+            out.textContent = JSON.stringify({
+              ok: true,
+              mode: 'bench',
+              frames: benchFrames,
+              median: +pct(0.5).toFixed(2),
+              p95: +pct(0.95).toFixed(2),
+              max: +sorted[sorted.length - 1].toFixed(2),
+            })
+            return
+          }
+
           const frame = createFrame(W, H)
           clearFrame(frame)
           drawParts(frame, staticParts(skin, { outer: true, armWidth: slim ? 3 : 4 }), skin)
