@@ -57,19 +57,35 @@ function rolePayload(state) {
   }
 }
 
+// 状态时间表：?seq=thinking,idle —— 每 3 次 wait.json 请求（约 3 秒）推进一步，
+// 用来验「降级能不能走通」（进入 thinking 后回 idle）。
+const seqCursor = new Map()
+
 function api(req, res, url) {
   const p = url.pathname
-  // state / audio 来自**页面 URL**（referer），因为挂件请求 API 时不带这些参数
+  // state / audio / seq 来自**页面 URL**（referer），因为挂件请求 API 时不带这些参数
   let state = 'idle'
   let audio = false
+  let seq = []
+  const refKey = String(req.headers.referer || '')
   try {
-    const ref = new URL(String(req.headers.referer || ''), `http://127.0.0.1:${PORT}`)
+    const ref = new URL(refKey, `http://127.0.0.1:${PORT}`)
     if (STATE.includes(ref.searchParams.get('state'))) state = ref.searchParams.get('state')
     audio = ref.searchParams.get('audio') === '1'
+    const raw = ref.searchParams.get('seq') || ''
+    seq = raw.split(',').map((s) => s.trim()).filter((s) => STATE.includes(s))
   } catch (err) {}
 
   if (p === '/dsh-whale/roles.json') return json(res, rolePayload(state))
-  if (p === '/dsh-whale/wait.json') return json(res, { ok: true, state, since: Date.now(), pending: null, sessionName: '' })
+  if (p === '/dsh-whale/wait.json') {
+    let cur = state
+    if (seq.length) {
+      const n = seqCursor.get(refKey) || 0
+      cur = seq[Math.min(Math.floor(n / 3), seq.length - 1)]
+      seqCursor.set(refKey, n + 1)
+    }
+    return json(res, { ok: true, state: cur, since: Date.now(), pending: null, sessionName: '' })
+  }
   if (p === '/dsh-whale/audio.json') return json(res, { ok: true, active: audio })
   if (p === '/dsh-whale/balance.json') return json(res, { ok: false })
   if (p === '/dsh-whale/last-turn.json') return json(res, { ok: false })

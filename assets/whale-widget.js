@@ -24930,7 +24930,9 @@ function pollWaitState() {
           // done/error 是终结态：角色没做这两张图时直接回 idle。
           // 否则 host 那 3 秒“终结态停留”会全变成“思考完了还卡在 thinking”，再叠加 1 秒轮询就是 4 秒级延迟。
           // 有 done/error 图的角色不受影响，仍按 host 的停留时长展示。
-          if ((st === 'done' || st === 'error') && currentRole && currentRole.states &&
+          // 没有 done/error 图的角色直接回 idle。skin 后端任何状态都能渲染姿态，
+          // 不能走这条降级，否则「跳一下」「摇头」永远看不到（skin 角色 states 恒为 ['idle']）。
+          if (!petIsSkinRole() && (st === 'done' || st === 'error') && currentRole && currentRole.states &&
               currentRole.states.indexOf(st) < 0) st = 'idle'
           applyState(st)
         }
@@ -25210,15 +25212,26 @@ function petTick(nowMs) {
 }
 
 // 状态 → 姿态：与 img 后端共用 pollWaitState 的 1 秒周期，零新增定时器（plan.md §1）
+var petPendingState = ''
 function petApplyState(name) {
   var eng = petEngine
   if (!eng) return
   try {
     var st = String(name || 'idle')
     if (['idle', 'thinking', 'working', 'waiting', 'done', 'error'].indexOf(st) < 0) st = 'idle'
-    // 时间源必须与 petTick 一致（performance.now）：用 Date.now 会让过渡起点落在
-    // 1.7e12 量级、而 sample 用毫秒计时，t 恒为负 → 永远停在 from 姿态（实测踩过）。
-    eng.machine.request(st, performance.now())
+    var nowMs = performance.now()
+    var mine = eng.machine
+    if (mine.request(st, nowMs)) { petPendingState = ''; petSchedule(); return }
+    if (st === mine.state) { petPendingState = ''; return }
+    // request 被拒有三种原因：终结态锁定 / 最短停留未满 / 优先级不降级。
+    // 后两种必须能走通，否则 thinking、working、waiting 结束后会一直卡着不回 idle
+    // （用户实测：进入 thinking 之后不再切换任何状态）。
+    if (mine.holdUntil && nowMs < mine.holdUntil) return
+    if (petPendingState !== st) { petPendingState = st; return }
+    // 连续两次轮询（约 2s）都在要求同一状态 → 认定是宿主的真实状态，强制切过去。
+    // 两拍是为了过滤「宿主抖动一下又回来」，代价是最多 2 秒延迟。
+    mine.force(st, nowMs)
+    petPendingState = ''
     petSchedule()
   } catch (err) {}
 }
