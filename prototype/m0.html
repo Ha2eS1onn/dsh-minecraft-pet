@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>M0 · 皮肤方块人原型</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #1b1b1f;
+        color: #cfcfd6;
+        font: 13px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
+      }
+      main {
+        display: flex;
+        gap: 28px;
+        align-items: center;
+        flex-wrap: wrap;
+        justify-content: center;
+        padding: 24px;
+      }
+      canvas {
+        width: 352px;
+        height: 416px;
+        image-rendering: pixelated;
+        background: conic-gradient(#26262b 25%, #202024 0 50%, #26262b 0 75%, #202024 0) 0 0/24px 24px;
+        border-radius: 10px;
+      }      dl {
+        margin: 0;
+        display: grid;
+        grid-template-columns: auto auto;
+        gap: 4px 14px;
+      }
+      dt {
+        color: #7d7d88;
+      }
+      dd {
+        margin: 0;
+        color: #e6e6ee;
+      }
+      button,
+      label {
+        font: inherit;
+        color: inherit;
+      }
+      button {
+        background: #2c2c33;
+        border: 1px solid #3a3a44;
+        border-radius: 6px;
+        padding: 4px 10px;
+        cursor: pointer;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <canvas id="view" width="352" height="416"></canvas>
+      <div>
+        <div class="row" style="margin-bottom: 14px">
+          <label>皮肤 <input id="file" type="file" accept="image/png" /></label>
+          <button id="reset">恢复默认</button>
+        </div>
+        <div class="row" style="margin-bottom: 14px">
+          <label>
+            状态
+            <select id="state">
+              <option value="idle">idle 待机</option>
+              <option value="thinking">thinking 思考</option>
+              <option value="working">working 干活</option>
+              <option value="waiting">waiting 等确认</option>
+              <option value="done">done 完成</option>
+              <option value="error">error 出错</option>
+            </select>
+          </label>
+        </div>
+        <div class="row" style="margin-bottom: 14px">
+          <label>
+            装饰
+            <select id="deco">
+              <option value="none">无</option>
+              <option value="rabbit">兔耳</option>
+              <option value="cat">猫耳</option>
+              <option value="heart">爱心</option>
+              <option value="lollipop">棒棒糖</option>
+            </select>
+          </label>
+          <button id="gesture">试手势</button>
+        </div>
+        <div class="row" style="margin-bottom: 14px">
+          <label><input id="music" type="checkbox" /> 模拟后台音乐（音符来源）</label>
+        </div>
+        <dl>
+          <dt>图集</dt>
+          <dd id="d-size">—</dd>
+          <dt>legacy</dt>
+          <dd id="d-legacy">—</dd>
+          <dt>非透明像素</dt>
+          <dd id="d-opaque">—</dd>
+          <dt>包围盒</dt>
+          <dd id="d-bounds">—</dd>
+          <dt>单帧耗时</dt>
+          <dd id="d-time">—</dd>
+        </dl>
+      </div>
+    </main>
+    <script type="module">
+      import {
+        createFrame,
+        clearFrame,
+        skinFromImage,
+        drawParts,
+        textureFromImage,
+        toImageData,
+      } from '../assets/skin-render.js'
+      import { buildParts } from '../assets/skin-model.js'
+      import { PetStateMachine, PET_STATES } from '../assets/pet-state.js'
+      import { PetAnimator } from '../assets/pet-anim.js'
+      import { NoteField } from '../assets/effects.js'
+      import { StatusEffects } from '../assets/status-effects.js'
+      import { decorationParts } from '../assets/decorations.js'
+
+      // 画布按 DPR 放大：CSS 尺寸固定 352×416，物理像素 = 352×416×dpr。
+      // 任何系统缩放下都是 1 逻辑像素 = 1 物理像素，不会出现非整数台阶。
+      const CSS_W = 352
+      const CSS_H = 416
+      const dpr = window.devicePixelRatio || 1
+      const W = Math.round(CSS_W * dpr)
+      const H = Math.round(CSS_H * dpr)
+      const canvas = document.getElementById('view')
+      canvas.width = W
+      canvas.height = H
+      canvas.style.width = `${CSS_W}px`
+      canvas.style.height = `${CSS_H}px`
+      const ctx = canvas.getContext('2d')
+      const frame = createFrame(W, H)
+
+      const img = new Image()
+      img.decoding = 'async'
+
+      const sm = new PetStateMachine(0)
+      const stateSelect = document.getElementById('state')
+      // 支持 ?state=working 直达，方便 headless 截图核对
+      const initial = new URLSearchParams(location.search).get('state')
+      if (initial && PET_STATES.includes(initial)) stateSelect.value = initial
+
+      let currentSkin = null
+      let raf = 0
+      let cursor = null
+      let lastMs = 0
+      const anim = new PetAnimator(0)
+      const notes = new NoteField()
+      const statusFx = new StatusEffects()
+      let noteTex = null
+      let heartTex = null
+      let decoration = 'none'
+      let gestureIndex = 0
+      /** 音符只在「后台有音频在播放」时出现。浏览器拿不到系统音频，
+       *  这里用复选框模拟；M4 由宿主侧的 WASAPI 检测推给前端。 */
+      let musicActive = false
+
+      /** 任意尺寸纹理（note.png / heart.png）→ textureFromImage。 */
+      const loadTexture = (src) =>
+        new Promise((resolve) => {
+          const im = new Image()
+          im.onload = () => {
+            const c = document.createElement('canvas')
+            c.width = im.width
+            c.height = im.height
+            const cx = c.getContext('2d', { willReadFrequently: true })
+            cx.drawImage(im, 0, 0)
+            const { data } = cx.getImageData(0, 0, c.width, c.height)
+            resolve(textureFromImage({ width: c.width, height: c.height, data }))
+          }
+          im.onerror = () => resolve(null)
+          im.src = src
+        })
+      loadTexture('../assets/note.png').then((t) => (noteTex = t))
+      loadTexture('../assets/heart.png').then((t) => (heartTex = t))
+
+      // 鼠标在画布内时换算成逻辑坐标，交给动效层做头部跟随
+      canvas.addEventListener('mousemove', (e) => {
+        const r = canvas.getBoundingClientRect()
+        cursor = {
+          x: ((e.clientX - r.left) / r.width) * W,
+          y: ((e.clientY - r.top) / r.height) * H,
+        }
+      })
+      canvas.addEventListener('mouseleave', () => {
+        cursor = null
+      })
+      // 真实点击算用户输入：打手势时点一下会走回位（mousemove 不算，否则头一动就打断）
+      canvas.addEventListener('mousedown', () => {
+        anim.gestureInput(performance.now() / 1000)
+      })
+
+      function drawPose(pose, nowSec) {
+        if (!currentSkin) return
+        const t0 = performance.now()
+        clearFrame(frame)
+        const parts = buildParts(pose, currentSkin)
+        const head = parts.find((p) => p.key === 'head' && !p.inflate)
+        if (decoration !== 'none') parts.push(...decorationParts(head, decoration, { heart: heartTex }))
+        drawParts(frame, parts, currentSkin)
+        // 状态粒子：waiting 问号 / thinking 灯泡 / error 感叹号 / done 烟花
+        statusFx.draw(frame, head, nowSec)
+        // 音符画在人物之后，后画的盖在前画的上面（plan.md §6.5）。
+        notes.draw(frame, head, noteTex, nowSec)
+        const rgba = toImageData(frame)
+        ctx.putImageData(new ImageData(rgba, W, H), 0, 0)
+        const ms = performance.now() - t0
+
+        let opaque = 0
+        for (let i = 3; i < rgba.length; i += 4) if (rgba[i] > 0) opaque++
+        document.getElementById('d-size').textContent = `${currentSkin.width}×${currentSkin.height}`
+        document.getElementById('d-legacy').textContent = String(currentSkin.legacy)
+        document.getElementById('d-opaque').textContent = String(opaque)
+        document.getElementById('d-bounds').textContent = frame.bounds.join(', ')
+        document.getElementById('d-time').textContent = `${ms.toFixed(2)} ms`
+      }
+
+      // 原型阶段常驻 rAF：呼吸与鼠标跟随需要连续出帧。
+      // M4 接宿主时按 plan.md §11.1 的帧需求分级降级。
+      // working 状态下用随机按键模拟打字（M4 换成真实键盘事件）。
+      let nextDemoPress = 0
+      function loop() {
+        const nowMs = performance.now()
+        const dt = lastMs ? Math.min(0.1, (nowMs - lastMs) / 1000) : 1 / 60
+        lastMs = nowMs
+        const nowSec = nowMs / 1000
+        sm.tick(nowMs)
+        if (sm.state === 'working' && nowSec >= nextDemoPress) {
+          anim.press(nowSec)
+          nextDemoPress = nowSec + 0.12 + Math.random() * 0.18
+        }
+        const pose = anim.update(
+          sm.pose(nowMs),
+          { width: W, height: H, cursor, armWidth: 4, state: sm.state },
+          nowSec,
+          dt,
+        )
+        notes.update(nowSec, musicActive)
+        statusFx.update(nowSec, sm.state)
+        drawPose(pose, nowSec)
+        raf = requestAnimationFrame(loop)
+      }
+
+      function applyState(name, instant) {
+        const now = performance.now()
+        sm.force(name, now)
+        if (instant) {
+          sm.transition.from = sm.transition.to
+          sm.transition.duration = 0
+        }
+        if (!raf) raf = requestAnimationFrame(loop)
+      }
+
+      function loadFromImage(image) {
+        const c = document.createElement('canvas')
+        c.width = image.width
+        c.height = image.height
+        const cx = c.getContext('2d', { willReadFrequently: true })
+        cx.drawImage(image, 0, 0)
+        const data = cx.getImageData(0, 0, c.width, c.height)
+        currentSkin = skinFromImage({ width: data.width, height: data.height, data: data.data })
+        applyState(stateSelect.value, true)
+      }
+
+      function loadDefault() {
+        img.onload = () => loadFromImage(img)
+        img.onerror = () => {
+          document.getElementById('d-size').textContent = '默认皮肤加载失败'
+        }
+        img.src = '../assets/default-skin.png'
+      }
+
+      document.getElementById('reset').addEventListener('click', loadDefault)
+      document.getElementById('deco').addEventListener('change', (e) => {
+        decoration = e.target.value
+      })
+      document.getElementById('gesture').addEventListener('click', () => {
+        const kinds = ['stretch', 'tilt', 'sleepy']
+        anim.gestures.trigger(kinds[gestureIndex++ % kinds.length], performance.now() / 1000)
+      })
+      document.getElementById('music').addEventListener('change', (e) => {
+        musicActive = e.target.checked
+      })
+      stateSelect.addEventListener('change', () => applyState(stateSelect.value, false))
+      document.getElementById('file').addEventListener('change', (e) => {
+        const f = e.target.files?.[0]
+        if (!f) return
+        const url = URL.createObjectURL(f)
+        const tmp = new Image()
+        tmp.onload = () => {
+          loadFromImage(tmp)
+          URL.revokeObjectURL(url)
+        }
+        tmp.src = url
+      })
+
+      loadDefault()
+    </script>
+  </body>
+</html>

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>m0 probe</title>
+  </head>
+  <body>
+    <pre id="out">pending</pre>
+    <script type="module">
+      // 无头浏览器探针：渲染指定皮肤并把结果指纹写进 DOM，
+      // 供 `msedge --headless --dump-dom` 抓取，与 node 路径比对。
+      import {
+        createFrame,
+        clearFrame,
+        skinFromImage,
+        drawParts,
+        toImageData,
+      } from '../assets/skin-render.js'
+      import { staticParts } from '../assets/skin-model.js'
+
+      const W = 352
+      const H = 416
+      const q = new URLSearchParams(location.search)
+      const skinUrl = q.get('skin') || '../assets/default-skin.png'
+      const slim = q.get('slim') === '1'
+      const out = document.getElementById('out')
+
+      // FNV-1a 32bit，遍历 RGBA 全部字节
+      function fnv1a(bytes) {
+        let h = 0x811c9dc5
+        for (let i = 0; i < bytes.length; i++) {
+          h ^= bytes[i]
+          h = Math.imul(h, 0x01000193) >>> 0
+        }
+        return h.toString(16).padStart(8, '0')
+      }
+
+      const img = new Image()
+      img.onload = () => {
+        try {
+          const c = document.createElement('canvas')
+          c.width = img.width
+          c.height = img.height
+          const cx = c.getContext('2d', { willReadFrequently: true })
+          cx.drawImage(img, 0, 0)
+          const { data } = cx.getImageData(0, 0, c.width, c.height)
+          const skin = skinFromImage({ width: c.width, height: c.height, data })
+          const frame = createFrame(W, H)
+          clearFrame(frame)
+          drawParts(frame, staticParts(skin, { outer: true, armWidth: slim ? 3 : 4 }), skin)
+          const rgba = toImageData(frame)
+          let opaque = 0
+          for (let i = 3; i < rgba.length; i += 4) if (rgba[i] > 0) opaque++
+          out.textContent = JSON.stringify({
+            ok: true,
+            skin: `${skin.width}x${skin.height}`,
+            legacy: skin.legacy,
+            armWidth: slim ? 3 : 4,
+            opaque,
+            bounds: frame.bounds,
+            hash: fnv1a(rgba),
+          })
+        } catch (e) {
+          out.textContent = JSON.stringify({ ok: false, error: String(e) })
+        }
+      }
+      img.onerror = () => {
+        out.textContent = JSON.stringify({ ok: false, error: 'skin load failed' })
+      }
+      img.src = skinUrl
+    </script>
+  </body>
+</html>

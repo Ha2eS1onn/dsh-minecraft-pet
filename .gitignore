@@ -1,0 +1,29 @@
+# ============================================================================
+# 运行时数据 / 凭据：绝不入库
+# 这些文件由用户本机 DSH_HOME 生成，带着既泄露隐私也污染环境
+# ============================================================================
+.dshw-*.json
+.dshw-*.json.bak*
+.dshw-usage-archive.json
+.credentials.yaml
+.env
+gh-token.txt
+
+# Codex 的凭据 / 配置（若在仓库目录里出现）
+auth.json
+config.toml
+
+# 用户生成的资源目录
+whale-roles/
+whale-audio/
+whale-bubble-imgs/
+sessions/
+
+# 依赖与临时产物
+node_modules/
+*.zip
+*.log
+*.bak
+*.bak2
+*.bak-devpaths
+_patch_*.patch
