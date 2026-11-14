@@ -239,7 +239,8 @@ const core = createCore({
   const au = await call('/pet/audio-active.json', loopback)
   check('GET /pet/audio-active.json → 200 + active', au.statusCode === 200 && /"active":/.test(au.body))
   const widget = await call('/pet/widget.js', loopback)
-  check('R2 之前 /pet/widget.js 返回 404（不假装可用）', widget.statusCode === 404, `code=${widget.statusCode}`)
+  // R2 之前这里断言 404；assets/widget.js 落地后改成「有内容且是挂件本体」
+  check('GET /pet/widget.js → 200 + 含 DSH_PET 产物', widget.statusCode === 200 && String(widget.body).indexOf('DSH_PET') >= 0, `code=${widget.statusCode}`)
   const bad = await call('/pet/state.json', { host: '127.0.0.1:5173', 'sec-fetch-site': 'cross-site' })
   check('跨站请求 403', bad.statusCode === 403)
 }

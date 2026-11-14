@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dsh-minecraft-pet · R2 挂件 harness</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1b1b24; color: #bbb; font: 13px/1.5 system-ui, sans-serif; }
+  #root { padding: 16px; }
+  textarea { width: 280px; height: 60px; }
+  .hint { opacity: .6; margin-top: 12px; }
+  #probe { padding: 16px; color: #7ad; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<!-- 假 composer：满足挂件对主聊天界面的判定（data-composer-input / textarea） -->
+<div id="root">
+  <textarea data-composer-input="true" placeholder="harness composer"></textarea>
+  <div class="hint">
+    假宿主页面（新挂件 /pet/widget.js）：右下角应出现方块小人。<br>
+    查询参数：<code>?state=idle|thinking|working|waiting|done|error</code>、<code>&amp;audio=1</code>、<code>&amp;deco=cat</code>
+  </div>
+</div>
+<pre id="probe">waiting for widget…</pre>
+<script src="../assets/widget.js"></script>
+<script>
+  // 探针：把引擎状态与画布统计写进 #probe，供 `--dump-dom` 抓取（多次采样用 ⏎ 分隔）。
+  var probeLog = []
+  function probe() {
+    var out = document.getElementById('probe')
+    var c = document.querySelector('.dshmp-stage canvas')
+    var rows = []
+    if (!c) {
+      out.textContent = 'no canvas（挂件没挂上）'
+      return
+    }
+    rows.push('canvas ' + c.width + 'x' + c.height + ' css=' + Math.round(c.getBoundingClientRect().width))
+    try {
+      var s = window.__dshPetState ? window.__dshPetState() : null
+      rows.push('engine=' + (s ? JSON.stringify(s) : 'none'))
+    } catch (e) {
+      rows.push('engine read fail')
+    }
+    try {
+      var d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data
+      var opaque = 0, minx = 1e9, miny = 1e9, maxx = -1, maxy = -1, h = 0
+      for (var y = 0; y < c.height; y++) {
+        for (var x = 0; x < c.width; x++) {
+          var i = (y * c.width + x) * 4
+          if (d[i + 3] > 0) {
+            opaque++
+            if (x < minx) minx = x
+            if (x > maxx) maxx = x
+            if (y < miny) miny = y
+            if (y > maxy) maxy = y
+          }
+          h = (Math.imul(h, 16777619) ^ (d[i] << 16) ^ (d[i + 1] << 8) ^ d[i + 2] ^ d[i + 3]) >>> 0
+        }
+      }
+      rows.push('opaque=' + opaque)
+      rows.push('bounds=' + (opaque ? [minx, miny, maxx, maxy].join(',') : 'none'))
+      rows.push('hash=' + h.toString(16))
+    } catch (e) {
+      rows.push('read fail: ' + e.message)
+    }
+    probeLog.push(rows.join(' | '))
+    out.textContent = probeLog.join(' ⏎ ')
+  }
+  ;[1200, 2600, 4200, 6000].forEach(function (t) { setTimeout(probe, t) })
+  // 模拟真实打字：keydown → animator.press()（打字动画与手势打断的接线验证）
+  ;[1800, 2050, 2300, 2550].forEach(function (t) {
+    setTimeout(function () {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }))
+    }, t)
+  })
+  // 菜单与气泡的存在性（肉眼可见的 UI 契约）
+  setTimeout(function () {
+    var log = document.getElementById('probe')
+    var menu = document.querySelector('.dshmp-menu')
+    var bubble = document.querySelector('.dshmp-bubble')
+    log.textContent += ' ⏎ ui menu=' + !!menu + ' bubble=' + !!bubble + ' root=' + !!document.querySelector('.dshmp-root')
+  }, 6300)
+</script>
+</body>
+</html>
