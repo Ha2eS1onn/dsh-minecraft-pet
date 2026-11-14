@@ -25227,17 +25227,24 @@ function petTick(nowMs) {
     eng.lastMs = nowMs
     var nowSec = nowMs / 1000
     eng.machine.tick(nowMs)
-    // 打字结束（停手 2s）回宿主状态
+    // 打字结束（停手 2s）回宿主状态。起身前先把手放下 —— 否则过渡的 180ms 里
+    // 手掌还会往键位压，看起来像「站起来时手抽了一下」。
     if (petTypingUntil && nowMs > petTypingUntil) {
       petTypingUntil = 0
-      if (eng.machine.state === 'working' && petHostState === 'idle') eng.machine.force('idle', nowMs)
+      if (eng.machine.state === 'working' && petHostState === 'idle') {
+        try {
+          eng.anim.hands = [{ until: 0, key: null }, { until: 0, key: null }]
+          eng.anim._resetTyping()
+        } catch (err) {}
+        eng.machine.force('idle', nowMs)
+      }
     }
     // working 时「一直在敲键盘」：真实按键优先；安静超过 1.2s 就自己按节拍敲。
-    // 只靠真实按键的话，人打字间隔 0.2~0.5s、按压只有 0.15s 行程约 1.5 模型单位
-    // （挂件缩放后约 5 屏幕像素），观感就是「坐着不动」（用户实测反馈）。
     if (eng.machine.state === 'working') {
       var quiet = nowSec - (eng.lastRealPress || 0)
-      if (quiet > 1.2 && nowSec >= (eng.nextAutoPress || 0)) {
+      // 离起身不到 350ms 就别再起一个按压周期了（按压 0.15s + 抬手过渡正好撞上过渡）
+      var endingSoon = petTypingUntil && (petTypingUntil - nowMs) < 350
+      if (!endingSoon && quiet > 1.2 && nowSec >= (eng.nextAutoPress || 0)) {
         eng.anim.press(nowSec)
         eng.nextAutoPress = nowSec + 0.13 + Math.random() * 0.11
       }
