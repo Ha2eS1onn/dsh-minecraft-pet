@@ -2424,11 +2424,16 @@ return {
   // ---------------------------------------------------------------- 初始化
 
   function init() {
-    injectCss()
-    readOpts()
-    buildDom()
-    bindGlobal()
-    loadRole()
+    // 每一步单独 try：装修建 DOM 这种「一步失败就全灭」的写法，出问题时页面上什么线索都没有
+    // （R2 第一版就是 `startFrameLoop()` 这个不存在的函数把 init 整个炸掉，画布全透明）。
+    var steps = [injectCss, readOpts, buildDom, bindGlobal, loadRole]
+    for (var i = 0; i < steps.length; i++) {
+      try {
+        steps[i]()
+      } catch (err) {
+        window.__dshPetError = 'init.' + (steps[i].name || i) + ': ' + String((err && err.stack) || err).slice(0, 300)
+      }
+    }
   }
 
   function readOpts() {
@@ -2477,8 +2482,7 @@ return {
     }
     applyOpts()
     bindLocal()
-    startFrameLoop()
-    startPolling()
+    startPolling() // 首帧由 loadRole 结束时的 scheduleFrame() 起
   }
 
   function applyOpts() {

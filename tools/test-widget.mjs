@@ -101,5 +101,42 @@ check('idle 走 33ms（30fps）', shell.indexOf('IDLE_FRAME_MS = 33') >= 0)
 check('穿透状态下留了恢复入口', shell.indexOf('dshmp-resume') >= 0)
 check('有自检钩子 __dshPetState', shell.indexOf('window.__dshPetState') >= 0)
 
+// ④ 未定义函数扫描：R2 第一版里 `startFrameLoop()` 这个不存在的函数把 init 整个炸掉，
+//    画布全透明但所有断言都通过（因为没有任何断言真的执行过挂件）。这里静态兜住这一类错。
+{
+  const shellOnly = src.slice(e >= 0 ? e : 0)
+  // 去掉注释，避免把注释里提到的名字算进来
+  const code = shellOnly
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+    // 去掉字符串字面量：CSS 里的 translateY(7%) / scaleX(-1) 不是函数调用
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+  const defined = new Set()
+  for (const m of code.matchAll(/function\s+([A-Za-z_$][\w$]*)\s*\(/g)) defined.add(m[1])
+  for (const m of code.matchAll(/var\s+([A-Za-z_$][\w$]*)\s*=/g)) defined.add(m[1])
+  const GLOBALS = new Set([
+    'if', 'for', 'while', 'switch', 'catch', 'return', 'typeof', 'function', 'new', 'delete', 'in', 'of', 'void',
+    'fetch', 'setTimeout', 'setInterval', 'clearInterval', 'clearTimeout', 'requestAnimationFrame', 'cancelAnimationFrame',
+    'parseInt', 'parseFloat', 'isFinite', 'isNaN', 'String', 'Number', 'Boolean', 'Array', 'Object', 'Math', 'Date',
+    'JSON', 'Map', 'Set', 'Promise', 'Image', 'ImageData', 'MutationObserver', 'KeyboardEvent', 'localStorage',
+    'atob', 'btoa', 'encodeURIComponent', 'decodeURIComponent', 'console', 'Error', 'RegExp', 'Function',
+  ])
+  // 函数表达式的形参（resolve / reject 这类回调参数）也算已定义
+  for (const m of code.matchAll(/function\s*\(([^)]*)\)/g)) {
+    for (const raw of m[1].split(',')) {
+      const n = raw.trim()
+      if (n) defined.add(n)
+    }
+  }
+  const missing = new Set()
+  for (const m of code.matchAll(/(^|[^.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const name = m[2]
+    if (!defined.has(name) && !GLOBALS.has(name)) missing.add(name)
+  }
+  check('挂件壳里没有「调用了但没定义」的函数', missing.size === 0, [...missing].join(','))
+  check('init 分步包了 try/catch（一步失败不会全灭）', code.indexOf('var steps = [injectCss') >= 0)
+}
+
 console.log(`\n${fail === 0 ? '全部通过' : fail + ' 项失败'}  (${pass} ok / ${fail} fail)`)
 process.exit(fail === 0 ? 0 : 1)
