@@ -2784,7 +2784,7 @@ function frameSvgClean(code) {
 }
 
 var css = [
-  '.dshwv-root{position:fixed;right:0;bottom:0;--dshw-scale:1;--dshw-base:clamp(160px,calc(min(360px,min(100vw,100vh) * 0.40) * var(--dshw-scale)),900px);width:var(--dshw-base);height:var(--dshw-base);pointer-events:none;user-select:none;-webkit-user-select:none;z-index:9999;font-family:inherit;transition:left .16s ease,top .16s ease}',
+  '.dshwv-root{position:fixed;right:0;bottom:0;--dshw-scale:1;--dshw-base:clamp(122px,calc(min(250px,min(100vw,100vh) * 0.28) * var(--dshw-scale)),625px);width:var(--dshw-base);height:var(--dshw-base);pointer-events:none;user-select:none;-webkit-user-select:none;z-index:9999;font-family:inherit;transition:left .16s ease,top .16s ease}',
   // v634 移动端:去掉浏览器「点击高亮」方块——它画在可点元素的矩形包围盒上,
   // 泡泡的内联 SVG 形状尤其明显;同时禁掉 iOS 长按系统菜单/放大镜。
   // 只作用于挂件自身的 dshwv- 元素(该属性可继承,后代一并覆盖),不影响 DSH 页面自身的高亮。
@@ -2799,9 +2799,11 @@ var css = [
   '.dshwv-img{position:absolute;right:0;bottom:0;width:59.45%;height:59.45%;display:block;pointer-events:auto;-webkit-user-drag:none;user-select:none;object-fit:contain;object-position:right bottom}',
   // 手动翻转：只镜像角色图，菜单/泡泡/文字保持正向；不动 root、不参与自动判定
   '.dshwv-root.dshwv-flip .dshwv-img{transform:scaleX(-1);transform-origin:50% 50%}',
-  // skin 后端（M4）：与 .dshwv-img 同尺寸同锚点，画布 1:1 用 pixelated 上屏。
-  // 显示/隐藏由 JS 的 inline style 控制（两后端各建一个元素，按 kind 切，不动态增删）。
-  '.dshwv-canvas{position:absolute;right:0;bottom:0;width:59.45%;height:59.45%;display:none;pointer-events:auto;-webkit-user-drag:none;user-select:none;image-rendering:pixelated}',
+  // skin 后端（M4）：锚右下、与 .dshwv-img 同锚点，但**尺寸独立**——
+  // 气泡/菜单是容器级的（width:100%），把容器放大它们会一起变大（用户实测反馈
+  // 「余额气泡太大」）。所以容器恢复 DWS 原尺寸，只把方块人放大。
+  // height 用百分比 + aspect-ratio 保住 352:416，避免被容器压成 1:1（人物横向拉宽）。
+  '.dshwv-canvas{position:absolute;right:0;bottom:0;height:82%;width:auto;aspect-ratio:352 / 416;max-width:none;display:none;pointer-events:auto;-webkit-user-drag:none;user-select:none;image-rendering:pixelated}',
   '.dshwv-root.dshwv-flip .dshwv-canvas{transform:scaleX(-1);transform-origin:50% 50%}',
   // v751（PR #119）：光标不再写 document.body.style.cursor —— cursor 是可继承属性，写 <body> 会让 Blink
   // 失效**整棵文档树**的样式；而它在点击链路上按下/抬手各写一次，紧接着 isWhaleHit() 的
