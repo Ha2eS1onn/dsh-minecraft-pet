@@ -61,6 +61,17 @@ function rolePayload(state) {
 // 用来验「降级能不能走通」（进入 thinking 后回 idle）。
 const seqCursor = new Map()
 
+// 角色元数据：真机读的是 $DSH_HOME/pet-role/meta.json，harness 允许用 HARNESS_ROLE_META 指别处
+function readRoleMeta() {
+  const p = path.resolve(ROOT, process.env.HARNESS_ROLE_META || '')
+  try {
+    const m = JSON.parse(fs.readFileSync(p, 'utf8'))
+    return { name: String(m.name || '方块小人'), model: m.model === 'slim' ? 'slim' : 'classic' }
+  } catch (err) {
+    return { name: '方块小人', model: 'classic' }
+  }
+}
+
 function api(req, res, url) {
   const p = url.pathname
   // state / audio / seq 来自**页面 URL**（referer），因为挂件请求 API 时不带这些参数
@@ -77,6 +88,56 @@ function api(req, res, url) {
   } catch (err) {}
 
   if (p === '/dsh-whale/roles.json') return json(res, rolePayload(state))
+
+  // —— 新宿主（独立化 R1，lib/pet-host.js）的接口，字段见 plan.md §16.3 ——
+  // R2 的 assets/widget.js 直接对着这套接口开发；状态/音频同样从 page URL 取。
+  if (p === '/pet/state.json') {
+    let cur = state
+    if (seq.length) {
+      const n = seqCursor.get(refKey) || 0
+      cur = seq[Math.min(Math.floor(n / 3), seq.length - 1)]
+      seqCursor.set(refKey, n + 1)
+    }
+    return json(res, {
+      ok: true,
+      state: cur,
+      since: Date.now(),
+      pending: '',
+      turnCost: { seq: 128, turn: 12, amount: 0.0421, tokens: 18342, at: Date.now() - 4000 },
+    })
+  }
+  if (p === '/pet/balance.json') {
+    return json(res, {
+      ok: true,
+      balance: 58.42,
+      currency: 'CNY',
+      todayUsed: 1.37,
+      peak: false,
+      valley: true,
+      period: 'valley',
+      nextChangeAt: Math.floor(Date.now() / 1000) + 3600,
+      at: Date.now(),
+      error: '',
+    })
+  }
+  if (p === '/pet/role.json') {
+    const meta = readRoleMeta()
+    return json(res, { ok: true, name: meta.name, model: meta.model, hasCape: false })
+  }
+  if (p === '/pet/skin.png') {
+    const bytes = fs.readFileSync(path.resolve(ROOT, process.env.HARNESS_SKIN || 'assets/default-skin.png'))
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache', 'Content-Length': String(bytes.length) })
+    return res.end(bytes)
+  }
+  if (p === '/pet/audio-active.json') return json(res, { ok: true, active: audio, peak: audio ? 0.08 : 0 })
+  if (p === '/pet/widget.js') {
+    // R2 之前 widget.js 还不存在：先回落到旧的 whale-widget.js，方便对着新接口调样式
+    const f = path.join(ROOT, 'assets', fs.existsSync(path.join(ROOT, 'assets', 'widget.js')) ? 'widget.js' : 'whale-widget.js')
+    const text = fs.readFileSync(f)
+    res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-store' })
+    return res.end(text)
+  }
+
   if (p === '/dsh-whale/wait.json') {
     let cur = state
     if (seq.length) {
@@ -116,6 +177,7 @@ function api(req, res, url) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`)
   if (url.pathname.startsWith('/dsh-whale/')) return api(req, res, url)
+  if (url.pathname.startsWith('/pet/')) return api(req, res, url)
 
   let rel = decodeURIComponent(url.pathname)
   if (rel === '/' || rel === '') rel = '/prototype/plugin-harness.html'
