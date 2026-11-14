@@ -89,7 +89,7 @@ function api(req, res, url) {
 
   if (p === '/dsh-whale/roles.json') return json(res, rolePayload(state))
 
-  // —— 新宿主（独立化 R1，lib/pet-host.js）的接口，字段见 plan.md §16.3 ——
+  // —— 新宿主（lib/index.js）的接口，字段见 plan.md §16.3 ——
   // R2 的 assets/widget.js 直接对着这套接口开发；状态/音频同样从 page URL 取。
   if (p === '/pet/state.json') {
     let cur = state

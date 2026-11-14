@@ -6,7 +6,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { createCore, createGuard } from '../lib/pet-host.js'
+import { createCore, createGuard } from '../lib/index.js'
 import { createPetState, isPeak, nextPeakChangeAt, bjDayKey, costOf } from '../lib/pet-data.mjs'
 
 let pass = 0
@@ -168,7 +168,7 @@ const core = createCore({
 {
   // 让插件按临时 DSH_HOME 装配，别往真实用户目录里写角色
   process.env.DSH_HOME = tmpHome
-  const { default: plugin } = await import('../lib/pet-host.js')
+  const { default: plugin } = await import('../lib/index.js')
   check('插件名是 dsh-minecraft-pet', plugin.name === 'dsh-minecraft-pet')
 
   const routes = new Map()
