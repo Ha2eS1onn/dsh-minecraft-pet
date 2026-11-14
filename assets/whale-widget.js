@@ -2818,7 +2818,9 @@ var css = [
   '.dshwv-root.dshwv-cursor-grabbing .dshwv-img{pointer-events:auto;cursor:grabbing}',
   // 拖动期间握点相对挂件固定，让整个盒接过指针以保持 grabbing（类由按下时加、endDrag 摘）
   '.dshwv-root.dshwv-dragging .dshwv-body{pointer-events:auto;cursor:grabbing}',
-  '.dshwv-pop{position:absolute;left:0;top:0;width:100%;aspect-ratio:1026/700;pointer-events:none;z-index:1;--dshw-u:calc(var(--dshw-base) / 1026);transform:scale(.85);transform-origin:100% 100%}',
+  // 气泡整体往左上偏一点（left/top 是负值，百分比相对容器），
+  // 因为 scale 的原点是右下，缩小后会贴着容器右边和下边，视觉上像挂在角上。
+  '.dshwv-pop{position:absolute;left:-8%;top:-6%;width:100%;aspect-ratio:1026/700;pointer-events:none;z-index:1;--dshw-u:calc(var(--dshw-base) / 1026);transform:scale(.75);transform-origin:100% 100%}',
   // v822：形状专属容器（只在它里面重画 ⇒ 内容与动图不受影响）；铺满泡泡并排在最底层
   '.dshwv-shapewrap{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}',
   // 纵深防御：泡泡容器必须透明，形状由内部 SVG 绘制；用 !important 压掉外部
