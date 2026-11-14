@@ -6,7 +6,7 @@ import { decodePng } from './png.mjs'
 import { createFrame, clearFrame, skinFromImage, drawParts, toImageData, project, transformPoint } from '../assets/skin-render.js'
 import { buildParts, torsoSpace } from '../assets/skin-model.js'
 import { targetPose } from '../assets/pet-state.js'
-import { PetAnimator, blinkClosure } from '../assets/pet-anim.js'
+import { PetAnimator, blinkClosure, PRESS_SECONDS } from '../assets/pet-anim.js'
 import * as Q from '../assets/quat.js'
 
 let failed = 0
@@ -175,7 +175,10 @@ const CAM_VIEW = Q.multiply(Q.rotY(Math.atan2(30, 70)), Q.rotX(-Math.atan(23 / M
   // MDP 的 counter：counter%2===0 时取 side 1，故第一次按键落在右手
   anim.press(t)
   const pressStart = frames.length
-  advance(8) // 窗口内 0.133s（0.15s 的最后一帧正好跨在 until 边界上，避开它）
+  // 采样窗口按 PRESS_SECONDS 算（0.15s 时代是 8 帧；0.08s 时 4 帧），
+  // 取 85% 的窗口避开 until 边界那一帧的浮点撞线。
+  const pressFrames = Math.max(3, Math.round((PRESS_SECONDS * 0.85) / step))
+  advance(pressFrames)
   const pressed = frames[frames.length - 1]
   const travel = quatDist(hover.arms[1], pressed.arms[1])
   check('press() 压下右手', travel > 1e-3, travel.toFixed(4))
@@ -190,12 +193,12 @@ const CAM_VIEW = Q.multiply(Q.rotY(Math.atan2(30, 70)), Q.rotX(-Math.atan(23 / M
     `首帧 ${tripped[0].toFixed(4)} / 行程 ${travel.toFixed(4)}`,
   )
   check(
-    '按下不是瞬移：走完 90% 行程至少跨 4 帧',
-    at90 >= 3,
+    '按下不是瞬移：走完 90% 行程至少跨 3 帧（窗口缩短到 0.08s，采样只有 4 帧）',
+    at90 >= 2,
     `第 ${at90 + 1} 帧才到 90%`,
   )
   check('按压过程单调推进（无抖动）', tripped.every((v, i) => i === 0 || v >= tripped[i - 1] - 1e-12))
-  check('按压窗口内行程到 0.9 以上', anim.pressW[1] > 0.9, anim.pressW[1].toFixed(3))
+  check('按压采样末行程到 0.85 以上', anim.pressW[1] > 0.85, anim.pressW[1].toFixed(3))
 
   // --- 抬起过渡：同样不是一帧归位 ---
   advance(2)

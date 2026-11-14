@@ -1456,13 +1456,14 @@ const DEFAULT_ANIM = {
   rangeY: 30,
 }
 
-/** 一次按键把该手压在键位上多久（MDP `Hand { until: now + 0.15 }`）。 */
-const PRESS_SECONDS = 0.15
+/** 一次按键把该手压在键位上多久。MDP 是 0.15s，但那在快速打字（每秒 6~8 键）时
+ *  会让手一直压着起不来——两三次连打就只看到一手按死。缩短到 0.08s，敲击节奏能看出来。 */
+const PRESS_SECONDS = 0.08
 
 /** 按压行程的时间常数（秒）：按下快、抬起略慢，两端都补过渡。
- *  按下取 0.045 ≈ 3.3τ 覆盖 0.15s 的按压窗口，窗口末行程到 95%，不会「永远按不到底」。 */
-const PRESS_TAU_IN = 0.045
-const PRESS_TAU_OUT = 0.07
+ *  按下 τ=0.03：0.08s 的窗口 ≈2.7τ，采样到窗口 85% 处行程约 89%。 */
+const PRESS_TAU_IN = 0.03
+const PRESS_TAU_OUT = 0.045
 /** 权重距目标小于该值时直接吸附，保证无按键时严格回到悬停位（哈希回归需要逐位相同）。 */
 const SNAP = 1e-3
 /** 打字时手臂目标点的两端，照 MDP `render.rs:1031-1039`。 */
@@ -25239,10 +25240,12 @@ function petTick(nowMs) {
         eng.machine.force('idle', nowMs)
       }
     }
-    // working 时「一直在敲键盘」：真实按键优先；安静超过 1.2s 就自己按节拍敲。
-    if (eng.machine.state === 'working') {
+    // 「一直在敲键盘」只给宿主驱动的 working（AI 在干活）用。
+    // 用户打字联动进来的 working（宿主仍是 idle）不自动敲——否则停手后 1.2s
+    // 就开始自己敲、2s 才起身，每次起身前都会白敲几下。
+    if (eng.machine.state === 'working' && petHostState === 'working') {
       var quiet = nowSec - (eng.lastRealPress || 0)
-      // 离起身不到 350ms 就别再起一个按压周期了（按压 0.15s + 抬手过渡正好撞上过渡）
+      // 离起身不到 350ms 就别再起一个按压周期了（按压 + 抬手过渡正好撞上过渡）
       var endingSoon = petTypingUntil && (petTypingUntil - nowMs) < 350
       if (!endingSoon && quiet > 1.2 && nowSec >= (eng.nextAutoPress || 0)) {
         eng.anim.press(nowSec)

@@ -60,13 +60,14 @@ export const DEFAULT_ANIM = {
   rangeY: 30,
 }
 
-/** 一次按键把该手压在键位上多久（MDP `Hand { until: now + 0.15 }`）。 */
-export const PRESS_SECONDS = 0.15
+/** 一次按键把该手压在键位上多久。MDP 是 0.15s，但那在快速打字（每秒 6~8 键）时
+ *  会让手一直压着起不来——两三次连打就只看到一手按死。缩短到 0.08s，敲击节奏能看出来。 */
+export const PRESS_SECONDS = 0.08
 
 /** 按压行程的时间常数（秒）：按下快、抬起略慢，两端都补过渡。
- *  按下取 0.045 ≈ 3.3τ 覆盖 0.15s 的按压窗口，窗口末行程到 95%，不会「永远按不到底」。 */
-export const PRESS_TAU_IN = 0.045
-export const PRESS_TAU_OUT = 0.07
+ *  按下 τ=0.03：0.08s 的窗口 ≈2.7τ，采样到窗口 85% 处行程约 89%。 */
+export const PRESS_TAU_IN = 0.03
+export const PRESS_TAU_OUT = 0.045
 /** 权重距目标小于该值时直接吸附，保证无按键时严格回到悬停位（哈希回归需要逐位相同）。 */
 const SNAP = 1e-3
 /** 打字时手臂目标点的两端，照 MDP `render.rs:1031-1039`。 */
