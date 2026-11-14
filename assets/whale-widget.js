@@ -2803,7 +2803,9 @@ var css = [
   // 气泡/菜单是容器级的（width:100%），把容器放大它们会一起变大（用户实测反馈
   // 「余额气泡太大」）。所以容器恢复 DWS 原尺寸，只把方块人放大。
   // height 用百分比 + aspect-ratio 保住 352:416，避免被容器压成 1:1（人物横向拉宽）。
-  '.dshwv-canvas{position:absolute;right:0;bottom:0;height:82%;width:auto;aspect-ratio:352 / 416;max-width:none;display:none;pointer-events:auto;-webkit-user-drag:none;user-select:none;image-rendering:pixelated}',
+  // bottom 用负值：模型空间里脚底在画布 333/416 ≈ 80%，底部那 20% 是留白。
+  // 不下移的话人物看起来离屏幕底边还差一截（用户反馈「位置偏上」）。
+  '.dshwv-canvas{position:absolute;right:0;bottom:-16%;height:82%;width:auto;aspect-ratio:352 / 416;max-width:none;display:none;pointer-events:auto;-webkit-user-drag:none;user-select:none;image-rendering:pixelated}',
   '.dshwv-root.dshwv-flip .dshwv-canvas{transform:scaleX(-1);transform-origin:50% 50%}',
   // v751（PR #119）：光标不再写 document.body.style.cursor —— cursor 是可继承属性，写 <body> 会让 Blink
   // 失效**整棵文档树**的样式；而它在点击链路上按下/抬手各写一次，紧接着 isWhaleHit() 的
@@ -2816,7 +2818,7 @@ var css = [
   '.dshwv-root.dshwv-cursor-grabbing .dshwv-img{pointer-events:auto;cursor:grabbing}',
   // 拖动期间握点相对挂件固定，让整个盒接过指针以保持 grabbing（类由按下时加、endDrag 摘）
   '.dshwv-root.dshwv-dragging .dshwv-body{pointer-events:auto;cursor:grabbing}',
-  '.dshwv-pop{position:absolute;left:0;top:0;width:100%;aspect-ratio:1026/700;pointer-events:none;z-index:1;--dshw-u:calc(var(--dshw-base) / 1026)}',
+  '.dshwv-pop{position:absolute;left:0;top:0;width:100%;aspect-ratio:1026/700;pointer-events:none;z-index:1;--dshw-u:calc(var(--dshw-base) / 1026);transform:scale(.85);transform-origin:100% 100%}',
   // v822：形状专属容器（只在它里面重画 ⇒ 内容与动图不受影响）；铺满泡泡并排在最底层
   '.dshwv-shapewrap{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}',
   // 纵深防御：泡泡容器必须透明，形状由内部 SVG 绘制；用 !important 压掉外部
