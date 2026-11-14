@@ -25156,6 +25156,8 @@ function petStart(role) {
             model: e.model,
             skin: e.skin.width + 'x' + e.skin.height,
             poses: !!e.anim,
+            // 打字按压计数：验 keydown → press() 这条接线有没有通
+            presses: e.anim.counter,
           }
         }
       } catch (err) {}
@@ -25197,6 +25199,18 @@ function petTick(nowMs) {
     eng.lastMs = nowMs
     var nowSec = nowMs / 1000
     eng.machine.tick(nowMs)
+    // working 时「一直在敲键盘」：真实按键优先；安静超过 1.2s 就自己按节拍敲。
+    // 只靠真实按键的话，人打字间隔 0.2~0.5s、按压只有 0.15s 行程约 1.5 模型单位
+    // （挂件缩放后约 5 屏幕像素），观感就是「坐着不动」（用户实测反馈）。
+    if (eng.machine.state === 'working') {
+      var quiet = nowSec - (eng.lastRealPress || 0)
+      if (quiet > 1.2 && nowSec >= (eng.nextAutoPress || 0)) {
+        eng.anim.press(nowSec)
+        eng.nextAutoPress = nowSec + 0.13 + Math.random() * 0.11
+      }
+    } else {
+      eng.nextAutoPress = 0
+    }
     var armWidth = eng.model === 'slim' ? 3 : 4
     var pose = eng.anim.update(
       eng.machine.pose(nowMs),
@@ -25276,6 +25290,8 @@ try {
     if (!eng) return
     try {
       var nowSec = performance.now() / 1000
+      eng.lastRealPress = nowSec
+      eng.nextAutoPress = nowSec + 0.18
       eng.anim.press(nowSec)
       eng.anim.gestureInput(nowSec)
       petSchedule()
