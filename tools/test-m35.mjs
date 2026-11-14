@@ -165,6 +165,53 @@ const quatDist = (a, b) => a.reduce((s, v, k) => s + Math.abs(v - b[k]), 0)
     return skinFromImage({ width: w, height: h, data })
   })()
   check('HD 皮肤（2×）也能检出识别格', hd.eyes !== null)
+
+  // 真机素材（用户提供的 DA 识别格皮肤）：2 行高的格子 + 眼皮薄片贴合的整条链路。
+  const da = skinFromImage(read('prototype/da-skin.png'))
+  check('DA 皮肤能检出识别格', da.eyes !== null)
+  if (da.eyes) {
+    const e = da.eyes.right
+    check('DA 识别格：脸部第 5 行起、2 行高', e.y0 === 5 && e.rows === 2 && e.x0 === 5 && e.x1 === 6, JSON.stringify(e))
+    check('DA 眼皮 UV 指向 (24,5)', e.lid.join(',') === '24,5,25,5', JSON.stringify(e.lid))
+  }
+  const daShot = (eyelid) => render(buildParts({ ...defaultPose(), eyelid }, da, { outer: true }), da).rgba
+  const daOpen = daShot(1)
+  const daShut = daShot(0)
+  // 眼睛配色（贴图里那只异色瞳的四种颜色）：闭眼后这些像素应基本消失。
+  const EYE_RGB = [[201, 70, 13], [255, 185, 34], [0, 62, 169], [98, 214, 254]]
+  const isEyeRgb = (r, g, b) => EYE_RGB.some(([R, G, B]) => Math.abs(r - R) + Math.abs(g - G) + Math.abs(b - B) < 90)
+  // 睁闭差异区就是眼睛所在的屏幕范围，只在这里统计，避免把头发同色像素算进来。
+  let dx0 = W
+  let dy0 = H
+  let dx1 = -1
+  let dy1 = -1
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4
+      const d = Math.abs(daOpen[i] - daShut[i]) + Math.abs(daOpen[i + 1] - daShut[i + 1]) + Math.abs(daOpen[i + 2] - daShut[i + 2])
+      if (d > 8) {
+        if (x < dx0) dx0 = x
+        if (x > dx1) dx1 = x
+        if (y < dy0) dy0 = y
+        if (y > dy1) dy1 = y
+      }
+    }
+  }
+  const countEye = (rgba) => {
+    let n = 0
+    for (let y = dy0; y <= dy1; y++) {
+      for (let x = dx0; x <= dx1; x++) {
+        const i = (y * W + x) * 4
+        if (rgba[i + 3] > 200 && isEyeRgb(rgba[i], rgba[i + 1], rgba[i + 2])) n++
+      }
+    }
+    return n
+  }
+  const openEye = dx1 < 0 ? 0 : countEye(daOpen)
+  const shutEye = dx1 < 0 ? 0 : countEye(daShut)
+  check('DA 闭眼确实改变了眼睛区域', dx1 >= 0 && openEye > 50, `${openEye} px`)
+  // 阈值 15%：眼皮 z 推到 4.52 时因相机 3/4 视角横移，会漏出约 22% 的彩色竖线。
+  check('DA 闭眼后眼睛色残留 < 15%', shutEye <= openEye * 0.15, `${shutEye}/${openEye}`)
 }
 
 // ---------------------------------------------------------------- 2) 音符（音频驱动）

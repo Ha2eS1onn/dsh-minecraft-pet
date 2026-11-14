@@ -95,7 +95,8 @@ function api(req, res, url) {
   if (p === '/dsh-whale/size.json') return json(res, { ok: true, scale: 1 })
   if (p === '/dsh-whale/audio.json') return json(res, { ok: true, active: false })
   if (p === '/dsh-whale/role-skin.png') {
-    const bytes = fs.readFileSync(path.join(ROOT, 'assets', 'default-skin.png'))
+    // 换皮验收：HARNESS_SKIN=prototype/da-skin.png node tools/harness-server.mjs
+    const bytes = fs.readFileSync(path.resolve(ROOT, process.env.HARNESS_SKIN || 'assets/default-skin.png'))
     res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache', 'Content-Length': String(bytes.length) })
     return res.end(bytes)
   }

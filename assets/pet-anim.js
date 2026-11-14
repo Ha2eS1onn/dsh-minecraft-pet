@@ -51,8 +51,8 @@ export const DEFAULT_ANIM = {
   gesture: true,
   /** 装饰物：'none' | 'rabbit' | 'cat' | 'heart' | 'lollipop'（渲染层读取）。 */
   decoration: 'none',
-  /** 眨眼默认关：M3 只算出 eyelid，眼皮薄片要等 M3.5 的识别格检测。 */
-  blink: false,
+  /** 眨眼：只有皮肤画过识别格才有效果（没画的皮肤 skin.eyes 为 null，渲染层不出眼皮）。 */
+  blink: true,
   /** MDP 的 head_sensitivity_x/y = 100%（系数即源码里的 0.3 / 0.95）。 */
   sensX: 1,
   sensY: 1,
@@ -186,7 +186,7 @@ export class PetAnimator {
     }
   }
 
-  /** 眨眼：返回 eyelid（1 = 全睁）。M3 只算数值，M3.5 才画眼皮薄片。 */
+  /** 眨眼：返回 eyelid（1 = 全睁）。是否真的看得见由皮肤识别格决定（见 skin-model）。 */
   _blink(s, now) {
     if (!s.blink) return 1
     return 1 - blinkClosure(now * BLINK_RATE + this.blinkPhase)

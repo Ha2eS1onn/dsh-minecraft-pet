@@ -182,9 +182,10 @@ export function buildParts(
   if (skin?.eyes && eyelid < 0.998) {
     for (const eye of [skin.eyes.left, skin.eyes.right]) {
       const closed = 1 - eyelid
-      // 贴在头盒 +Z 面之外：hat 外层在 4.5，眼皮必须再靠前 0.02，否则不透明的
-      // hat 层会把眼皮整个挡掉（MDP 用 4.02，遇上不透明外层就看不到闭眼）。
-      const z = 4.5 + 0.02
+      // 贴在头盒 +Z 面之外 0.02（MDP `sz.z/2 + 0.02`）。不能为了躲开 hat 层往
+      // 前推到 4.52：相机是 3/4 视角（FORWARD 的 x 分量非零），正交投影下 z 也会
+      // 挪屏幕位置，0.5 单位对应约 1.6px 横移 —— 闭眼时眼睛内侧会漏一条彩线。
+      const z = 4 + 0.02
       const x0 = eye.x0 - 4
       const x1 = eye.x1 + 1 - 4
       const top = 4 - eye.y0
