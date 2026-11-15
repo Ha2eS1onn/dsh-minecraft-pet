@@ -83,15 +83,17 @@ if (PET) {
   check('状态机 + 动效可组合运行', okForce && pose && typeof a.eyelid === 'number')
   check('动效暴露 counter / gestureBusy / gestureInput（挂件壳用到）', typeof a.counter === 'number' && 'gestureBusy' in a && typeof a.gestureInput === 'function')
 
-  // P2 的四个新模块也必须真的在产物里（build-widget 的 MODULES 漏一个就会在这里炸）
+  // P2 接线中的三个模块必须真的在产物里（build-widget 的 MODULES 漏一个就会在这里炸）。
+  // spring 已按用户要求回退，故意不内联。
   for (const [mod, fns] of [
-    ['spring', ['Spring']],
     ['geo', ['parseGeo', 'geoParts', 'checkTextureSize']],
     ['typeLetters', ['buildGlyphs', 'keyLabelFromEvent', 'keyPositionFromCode', 'canvasRasterizer']],
     ['letters', ['LetterField']],
   ]) {
     check(`产物暴露 ${mod} 模块`, !!PET[mod] && fns.every((f) => typeof PET[mod][f] === 'function'), fns.filter((f) => !PET[mod] || typeof PET[mod][f] !== 'function').join(','))
   }
+  check('物理已回退：产物里不再有 spring / physicsBusy', !PET.spring && bundleSrc.indexOf('class Spring') < 0 && bundleSrc.indexOf('physicsBusy') < 0)
+  check('动效回到 P1：实例上没有 physicsBusy / physics', !('physicsBusy' in a) && !('physics' in a))
   check('产物内嵌小鸭贴图与 geo 模型', String(PET.assets.duck || '').indexOf('data:image/png;base64,') === 0 && String(PET.assets.duckGeo || '').indexOf('minecraft:geometry') > 0)
   const duck = PET.geo.parseGeo(PET.assets.duckGeo)
   check('内嵌 geo 能解析出盒子', duck.parts.length >= 6, `${duck.parts.length} parts`)
@@ -103,10 +105,6 @@ if (PET) {
       return false
     }
   })())
-  const spring = new PET.spring.Spring({ k: 140, zeta: 0.5 })
-  for (let i = 0; i < 120; i++) spring.step(10, 1 / 60)
-  check('弹簧能收敛（不是发散的积分）', Math.abs(spring.value - 10) < 0.01 && spring.settled, String(spring.value))
-  check('动效暴露 physicsBusy（帧需求分级用到）', 'physicsBusy' in a)
   const field = new PET.letters.LetterField()
   field.push([0, 10, 9], 'A', 0)
   check('LetterField 能 push / active', field.active && field.count === 1)
@@ -135,12 +133,17 @@ check('draw 把 geo 模型递给 decorations', shell.indexOf('geo: duckModel && 
 check('键盘矩阵每帧缓存给浮现字用', shell.indexOf("if (parts[i].key === 'keyboard') eng.kb = parts[i].transform") >= 0)
 check('LetterField 在引擎里实例化', shell.indexOf('letters: new (load().letters.LetterField)()') >= 0)
 check('keydown 会 push 一枚浮现字', shell.indexOf('pushLetter(e, nowMs / 1000)') >= 0)
+// 回归：第一版 handler 写成 function () {} 却在体内用 e，ReferenceError 被空 catch 吞掉，
+// 结果打字动画正常但浮现字永远不出现、控制台还没线索。
+check('keydown handler 真的接收了 event 形参', /document\.addEventListener\(\s*'keydown',\s*function \(e\) \{/.test(shell))
+check('keydown 的异常不再被空 catch 吞掉', shell.indexOf('letterStat.error') >= 0 && shell.indexOf("__dshPetError = 'keydown: '") >= 0)
+check('浮现字有可诊断计数（keys/noSit/noLabel/noPos/pushed/glyphs）', ['keys', 'noSit', 'noLabel', 'noPos', 'pushed', 'glyphs'].every((k) => shell.indexOf(k + ': letterStat.' + k) >= 0 || shell.indexOf(k + ': glyphSet') >= 0))
 check('只在坐姿显示（sit > 0.4）', shell.indexOf('lastPose.sit > 0.4') >= 0)
 check('字模走 canvasRasterizer 且缓存', shell.indexOf('T.canvasRasterizer(document)') >= 0 && shell.indexOf('if (glyphSet) return glyphSet') >= 0)
 check('绘制顺序：浮现字在音符之前', shell.indexOf('eng.letters.draw(') < shell.indexOf('eng.notes.draw(') && shell.indexOf('eng.letters.draw(') > 0)
 check('没有字时不造字模（首帧零开销）', shell.indexOf('if (eng.letters.active) eng.letters.draw(') >= 0)
-check('帧需求：有字或物理未收敛时 60fps', shell.indexOf('if (eng.letters.active) return 2') >= 0 && shell.indexOf('if (eng.anim.physicsBusy) return 2') >= 0)
-check('探针暴露 letters / physicsBusy', shell.indexOf('letters: eng.letters.count') >= 0 && shell.indexOf('physicsBusy: eng.anim.physicsBusy') >= 0)
+check('帧需求：有字时 60fps，且不再有物理分支', shell.indexOf('if (eng.letters.active) return 2') >= 0 && shell.indexOf('physicsBusy') < 0)
+check('探针暴露 letters / letterStat', shell.indexOf('letters: eng.letters.count') >= 0 && shell.indexOf('letterStat: {') >= 0)
 check('披风开关持久化用 dshmp-cape', shell.indexOf("cape: 'dshmp-cape'") >= 0)
 check('localStorage 统一用 dshmp- 前缀', (src.match(/'dshmp-/g) || []).length >= 5)
 check('不残留 DWS 的 storage 前缀 dshw-', src.indexOf("'dshw") < 0)

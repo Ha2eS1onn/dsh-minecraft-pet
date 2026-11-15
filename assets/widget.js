@@ -1177,90 +1177,6 @@ function geoParts(headPart, model, { texture, scale: k = 0.36, lift = 4.55 } = {
 
 return { pivotRotation, parseGeo, checkTextureSize, geoParts }
 })()
-var SPRING = (function () {
-// 阻尼弹簧（P2-a 物理模拟，plan.md §6.6）。
-//
-// MDP 里没有物理（全项目 spring/damping/velocity 零命中），这块是新写的。
-// 三条硬纪律（plan §6.6）：
-//   ① 固定步长 1/60，用累加器跑 N 次，**不按实际帧间隔积分** —— 否则 30fps 与 60fps 行为不同
-//   ② 支持瞬间重置：状态切换时归零，避免「从 done 回 idle 后带着残留速度歪着」
-//   ③ 不参与状态判定：物理只做次级运动，状态仍由事件驱动
-//
-// 用法：
-//   const s = new Spring({ k: 140, zeta: 0.5 })
-//   s.impulse(9)          // 给一次初速度（落地/被推）
-//   s.step(0, dt)         // 每帧推进，返回当前值
-//   s.settled             // 帧需求分级用：还在动就要 60fps
-
-const SPRING_DT = 1 / 60
-/** 单帧最多补算几步：卡顿后不要一次补 100 步把主线程堵住。 */
-const MAX_SUBSTEPS = 8
-
-class Spring {
-  /**
-   * @param {{k?:number, zeta?:number, value?:number, eps?:number}} [opts]
-   *   k 刚度（越大越快）、zeta 阻尼比（1 = 临界阻尼不振荡，0.5~0.8 有回弹）
-   */
-  constructor({ k = 120, zeta = 1, value = 0, eps = 1e-3 } = {}) {
-    this.k = k
-    this.zeta = zeta
-    this.c = 2 * Math.sqrt(k) * zeta
-    this.value = value
-    this.velocity = 0
-    this.target = value
-    this.eps = eps
-    this.acc = 0
-  }
-
-  /** 直接给速度（模型单位/秒）。落地回弹就是一次 impulse。 */
-  impulse(v) {
-    this.velocity += v
-    return this
-  }
-
-  /** 瞬间归零（状态切换时调；plan §6.6 纪律 ②）。 */
-  reset(value = 0) {
-    this.value = value
-    this.target = value
-    this.velocity = 0
-    this.acc = 0
-    return this
-  }
-
-  get settled() {
-    return Math.abs(this.value - this.target) < this.eps && Math.abs(this.velocity) < this.eps
-  }
-
-  /**
-   * 推进一帧。
-   * @param {number} target 目标值
-   * @param {number} dt 真实帧间隔（秒）；内部按固定步长积分
-   * @returns {number} 当前值
-   */
-  step(target, dt) {
-    this.target = target
-    const d = Math.max(0, Math.min(0.25, dt || 0))
-    this.acc += d
-    let n = 0
-    while (this.acc >= SPRING_DT && n < MAX_SUBSTEPS) {
-      const a = -this.k * (this.value - target) - this.c * this.velocity
-      this.velocity += a * SPRING_DT
-      this.value += this.velocity * SPRING_DT
-      this.acc -= SPRING_DT
-      n++
-    }
-    if (n === MAX_SUBSTEPS) this.acc = 0
-    // 收敛后吸附：不吸附的话 settled 永远为假，帧需求会一直卡在 60fps
-    if (Math.abs(this.value - target) < this.eps && Math.abs(this.velocity) < this.eps) {
-      this.value = target
-      this.velocity = 0
-    }
-    return this.value
-  }
-}
-
-return { SPRING_DT, Spring }
-})()
 var TYPE_LETTERS = (function () {
 // 敲字浮现字的第一半：键名 + 键位表（plan.md §17）。
 // Ported from Minecraft-Desktop-Pet (MIT) — native/src/render_effects.rs:17-40, 314-325
@@ -2038,13 +1954,12 @@ var PET_ANIM = (function () {
 // M3 动效四件套：呼吸 / 眨眼 / 头部跟随鼠标 / 打字手臂。
 // Ported from Minecraft-Desktop-Pet (MIT) — native/src/render.rs:21, 506, 826-1054
 //
-// 除呼吸权重外都是「时间的纯函数」。P2 加的物理模拟（spring.js）是唯一有速度状态的
-// 东西，只做次级运动：头部跟随的惯性、done 落地回弹、呼吸相位漂移（plan.md §6.6）。
+// 所有动效都是「时间的纯函数 + 少量积分状态」，与 MDP 一致：
+// 没有速度/加速度，只有 breathing_weight 那一个指数衰减量。
 
 var { project, transformPoint } = SKIN_RENDER
 var { torsoSpace, bodySpace } = SKIN_MODEL
 var { GestureScheduler } = GESTURES
-var { Spring } = SPRING
 var Q = QUAT
 
 const DEG = Math.PI / 180
@@ -2096,8 +2011,6 @@ const DEFAULT_ANIM = {
   sensY: 1,
   rangeX: 45,
   rangeY: 30,
-  /** P2 物理模拟：落地回弹 + 头部跟随惯性 + 呼吸相位漂移（plan.md §6.6）。 */
-  physics: true,
 }
 
 /** 一次按键把该手压在键位上多久。MDP 是 0.15s，但那在快速打字（每秒 6~8 键）时
@@ -2116,8 +2029,6 @@ const PRESS_Y = 10.35
 const HOVER_Z = 8.8
 /** waiting 的跳跃高度（模型单位）。MDP 的 Bounce 用 3.6，这里取 3.0。 */
 const HOP_HEIGHT = 3.0
-/** 落地冲量（模型单位/秒）：k=140、ζ=0.5 下峰值约 0.7 单位，肉眼能看出来但不夸张。 */
-const LAND_IMPULSE = 9
 
 /**
  * 动效层：吃状态机产出的姿态，叠加时间驱动的动效后交给渲染器。
@@ -2146,13 +2057,6 @@ class PetAnimator {
     this.state = null
     this.stateStart = 0
     this.eyelid = 1
-
-    // —— P2 物理（plan.md §6.6）——
-    /** done 落地：一次冲量 → 压缩 → 回弹。ζ=0.5 有回弹，k=140 大约 0.6s 收完。 */
-    this.bounce = new Spring({ k: 140, zeta: 0.5 })
-    /** 头部跟随的惯性：目标角度变化时落后一点再追上。ζ=0.85 基本不过冲。 */
-    this.trackH = new Spring({ k: 160, zeta: 0.85 })
-    this.trackV = new Spring({ k: 160, zeta: 0.85 })
   }
 
   /**
@@ -2195,15 +2099,10 @@ class PetAnimator {
     // 状态专属动画（thinking 挠头 / waiting 跳两下 / done 举手后鼓掌）。
     const state = ctx.state || null
     if (state !== this.state) {
-      // plan §6.6 纪律 ②：状态一切换，物理状态归零——否则 done→idle 会带着残留速度歪着。
-      // 只有进入 done 时才给一次落地冲量（落地压缩 → 回弹）。
-      this.bounce.reset(0)
       this.state = state
       this.stateStart = now
-      if (state === 'done') this.bounce.impulse(LAND_IMPULSE)
     }
     if (state) this._stateAnim(p, state, now - this.stateStart)
-    if (s.physics) this._physics(p, dt)
     // 待机手势最后叠加（MDP 的 apply_gesture 也在 update 末尾）。
     // 不看会话状态：坐着打字时也会伸懒腰，真实按键由调用方 gestureInput() 打断。
     if (s.gesture) {
@@ -2225,28 +2124,12 @@ class PetAnimator {
     return !!(this.gestures.active || this.gestures.returnFrom)
   }
 
-  /** 物理还在动吗（帧需求分级用：收敛过程必须保持 60fps，否则会卡在半路）。 */
-  get physicsBusy() {
-    return !this.bounce.settled || !this.trackH.settled || !this.trackV.settled
-  }
-
-  /**
-   * 物理后处理：只叠次级运动，不改状态、不改骨骼以外的任何东西。
-   * 步长由 Spring 内部按固定 1/60 积分（plan §6.6 纪律 ①）。
-   */
-  _physics(p, dt) {
-    const sink = this.bounce.step(0, dt)
-    if (sink) p.sink = (p.sink || 0) + sink
-  }
-
   /** 呼吸：指数逼近的权重 + 0.10 单位的上下起伏 + 头/臂的细微跟随。 */
   _breath(p, s, now, dt) {
     const want = s.breath ? 1 : 0
     this.breath += (want - this.breath) * (1 - Math.exp(-dt * (want > 0 ? 2.5 : 20)))
     if (this.breath < 0.001) this.breath = 0
-    // 呼吸相位漂移（P2）：周期不完全固定，看起来更"活"。只挪相位，振幅不变。
-    const drift = 0.18 * Math.sin(now * 0.13) + 0.09 * Math.sin(now * 0.37 + 1.7)
-    const wave = Math.sin(now * 1.7 + drift) * this.breath
+    const wave = Math.sin(now * 1.7) * this.breath
     p.breathing_bob = 0.1 * wave
     if (this.breath > 0) {
       p.head_rotation = Q.multiply(p.head_rotation, Q.fromEuler(wave * 0.012, 0, 0))
@@ -2271,23 +2154,13 @@ class PetAnimator {
   _trackHead(p, ctx, s, now, dt) {
     const d = Math.max(dt || 0, 0)
     // 光标不在画布上：直接回中立（这条不需要过渡，否则指针一离开就残留偏角）
-    if (!ctx.cursor) {
-      this.trackW = 0
-      this.trackH.reset(0)
-      this.trackV.reset(0)
-      return
-    }
+    if (!ctx.cursor) { this.trackW = 0; return }
     // ctx.state 缺省时按 idle 处理（老调用点不传状态，语义上就是"默认状态"）
     const idle = ctx.state == null || ctx.state === 'idle'
     const want = (s.track && idle && !this.gestureBusy) ? 1 : 0
     this.trackW += (want - this.trackW) * (1 - Math.exp(-d / 0.12))
     if (this.trackW < 1e-3) this.trackW = 0
-    if (this.trackW === 0) {
-      // 权重归零时把弹簧也归零：手势/状态结束后不能带着旧角度的惯性
-      this.trackH.reset(0)
-      this.trackV.reset(0)
-      return
-    }
+    if (this.trackW === 0) return
 
     const W = ctx.width
     const H = ctx.height
@@ -2310,11 +2183,8 @@ class PetAnimator {
       s.rangeY * DEG,
     )
     // 权重乘在角度上：trackW=0 时目标是严格中立，与状态姿态的 head_rotation 一致
-    const targetH = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
-    const targetV = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
-    // P2：角度过一层阻尼弹簧，转头有惯性、停下微微回弹（k=160 ζ=0.85，几乎不过冲）
-    const horizontal = s.physics ? this.trackH.step(targetH, d) : targetH
-    const vertical = s.physics ? this.trackV.step(targetV, d) : targetV
+    const horizontal = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
+    const vertical = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
 
     const desired = Q.multiply(
       Q.multiply(
@@ -2913,7 +2783,6 @@ return {
   render: SKIN_RENDER,
   model: SKIN_MODEL,
   geo: GEO_MODEL,
-  spring: SPRING,
   typeLetters: TYPE_LETTERS,
   letters: LETTERS,
   gestures: GESTURES,
@@ -2992,6 +2861,8 @@ return {
   var duckModel = null // P2-b：解析后的 .geo.json
   var glyphSet = null // P2-c：字模表（首次需要时造）
   var lastPose = null // 最近一帧的姿态（按键时判断是不是坐姿）
+  // P2-c 诊断计数：真机没出字时，F12 读 __dshPetState().letterStat 就能定位卡在哪一环
+  var letterStat = { keys: 0, noSit: 0, noLabel: 0, noPos: 0, pushed: 0, glyphs: 0, error: '' }
   var account = null // /pet/account.json 的快照
   var accountBusy = false
   var lastAcctMsg = '' // 面板上最后一条文案（含失败原因），探针里也读得到
@@ -3642,8 +3513,6 @@ return {
     if (!eng) return 0
     if (eng.notes.active || eng.status.active) return 2
     if (eng.letters.active) return 2
-    // P2-a：物理还在收敛时要 60fps，否则回弹会卡在半路（plan.md §6.6 第 5 条）
-    if (eng.anim.physicsBusy) return 2
     if (eng.anim.gestureBusy) return 2
     // 阈值故意留宽：blinkClosure 的尾巴很长，eyelid 几乎总是 0.999x，
     // 用 0.999 判断等于「永远 60fps」。0.95 覆盖真正看得见闭合的那一段。
@@ -3928,12 +3797,24 @@ return {
    */
   function pushLetter(e, nowSec) {
     if (!eng || !eng.letters) return
+    // 只在坐姿出现（plan §17.3 / MDP 的 is_sitting）。宿主在 thinking/waiting 等状态时
+    // 不抢状态、pose.sit 仍为 0，此时打字按规格不出字 —— letterStat.noSit 能看出来。
     var sitting = lastPose ? lastPose.sit > 0.4 : false
-    if (!sitting) return
+    if (!sitting) {
+      letterStat.noSit += 1
+      return
+    }
     var T = load().typeLetters
     var label = T.keyLabelFromEvent(e)
+    if (!label) {
+      letterStat.noLabel += 1
+      return
+    }
     var off = T.keyPositionFromCode(e.code)
-    if (!label || !off) return
+    if (!off) {
+      letterStat.noPos += 1
+      return
+    }
     var pos
     if (eng.kb) {
       pos = load().render.transformPoint(eng.kb, [off[0], 0.3, off[1]])
@@ -3942,6 +3823,7 @@ return {
       pos = [off[0], 10.5, 9.4 + off[1]]
     }
     eng.letters.push(pos, label, nowSec)
+    letterStat.pushed += 1
   }
 
   function bindGlobal() {
@@ -4002,9 +3884,10 @@ return {
     // 键盘输入 → 打字动画（同时打断待机手势）
     document.addEventListener(
       'keydown',
-      function () {
+      function (e) {
         if (!eng) return
         try {
+          letterStat.keys += 1
           var nowMs = performance.now()
           eng.anim.press(nowMs / 1000)
           if (eng.anim.gestureInput) eng.anim.gestureInput(nowMs / 1000)
@@ -4012,7 +3895,11 @@ return {
           typingUntil = nowMs + 2000
           pushLetter(e, nowMs / 1000)
           scheduleFrame()
-        } catch (err) {}
+        } catch (err) {
+          // 别再静默：M5 的「按钮没反应」就是被空 catch 吞掉的
+          letterStat.error = String((err && err.message) || err).slice(0, 160)
+          window.__dshPetError = 'keydown: ' + letterStat.error
+        }
       },
       true
     )
@@ -4042,7 +3929,15 @@ return {
         accountBusy: accountBusy,
         accountMsg: lastAcctMsg,
         letters: eng.letters.count,
-        physicsBusy: eng.anim.physicsBusy,
+        letterStat: {
+          keys: letterStat.keys,
+          noSit: letterStat.noSit,
+          noLabel: letterStat.noLabel,
+          noPos: letterStat.noPos,
+          pushed: letterStat.pushed,
+          glyphs: glyphSet ? glyphSet.size : 0,
+          error: letterStat.error,
+        },
         eyelid: eng.anim.eyelid,
         presses: eng.anim.counter,
         deco: opts.deco,

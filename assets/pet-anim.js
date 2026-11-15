@@ -1,13 +1,12 @@
 // M3 动效四件套：呼吸 / 眨眼 / 头部跟随鼠标 / 打字手臂。
 // Ported from Minecraft-Desktop-Pet (MIT) — native/src/render.rs:21, 506, 826-1054
 //
-// 除呼吸权重外都是「时间的纯函数」。P2 加的物理模拟（spring.js）是唯一有速度状态的
-// 东西，只做次级运动：头部跟随的惯性、done 落地回弹、呼吸相位漂移（plan.md §6.6）。
+// 所有动效都是「时间的纯函数 + 少量积分状态」，与 MDP 一致：
+// 没有速度/加速度，只有 breathing_weight 那一个指数衰减量。
 
 import { project, transformPoint } from './skin-render.js'
 import { torsoSpace, bodySpace } from './skin-model.js'
 import { GestureScheduler } from './gestures.js'
-import { Spring } from './spring.js'
 import * as Q from './quat.js'
 
 const DEG = Math.PI / 180
@@ -59,8 +58,6 @@ export const DEFAULT_ANIM = {
   sensY: 1,
   rangeX: 45,
   rangeY: 30,
-  /** P2 物理模拟：落地回弹 + 头部跟随惯性 + 呼吸相位漂移（plan.md §6.6）。 */
-  physics: true,
 }
 
 /** 一次按键把该手压在键位上多久。MDP 是 0.15s，但那在快速打字（每秒 6~8 键）时
@@ -79,8 +76,6 @@ const PRESS_Y = 10.35
 const HOVER_Z = 8.8
 /** waiting 的跳跃高度（模型单位）。MDP 的 Bounce 用 3.6，这里取 3.0。 */
 const HOP_HEIGHT = 3.0
-/** 落地冲量（模型单位/秒）：k=140、ζ=0.5 下峰值约 0.7 单位，肉眼能看出来但不夸张。 */
-const LAND_IMPULSE = 9
 
 /**
  * 动效层：吃状态机产出的姿态，叠加时间驱动的动效后交给渲染器。
@@ -109,13 +104,6 @@ export class PetAnimator {
     this.state = null
     this.stateStart = 0
     this.eyelid = 1
-
-    // —— P2 物理（plan.md §6.6）——
-    /** done 落地：一次冲量 → 压缩 → 回弹。ζ=0.5 有回弹，k=140 大约 0.6s 收完。 */
-    this.bounce = new Spring({ k: 140, zeta: 0.5 })
-    /** 头部跟随的惯性：目标角度变化时落后一点再追上。ζ=0.85 基本不过冲。 */
-    this.trackH = new Spring({ k: 160, zeta: 0.85 })
-    this.trackV = new Spring({ k: 160, zeta: 0.85 })
   }
 
   /**
@@ -158,15 +146,10 @@ export class PetAnimator {
     // 状态专属动画（thinking 挠头 / waiting 跳两下 / done 举手后鼓掌）。
     const state = ctx.state || null
     if (state !== this.state) {
-      // plan §6.6 纪律 ②：状态一切换，物理状态归零——否则 done→idle 会带着残留速度歪着。
-      // 只有进入 done 时才给一次落地冲量（落地压缩 → 回弹）。
-      this.bounce.reset(0)
       this.state = state
       this.stateStart = now
-      if (state === 'done') this.bounce.impulse(LAND_IMPULSE)
     }
     if (state) this._stateAnim(p, state, now - this.stateStart)
-    if (s.physics) this._physics(p, dt)
     // 待机手势最后叠加（MDP 的 apply_gesture 也在 update 末尾）。
     // 不看会话状态：坐着打字时也会伸懒腰，真实按键由调用方 gestureInput() 打断。
     if (s.gesture) {
@@ -188,28 +171,12 @@ export class PetAnimator {
     return !!(this.gestures.active || this.gestures.returnFrom)
   }
 
-  /** 物理还在动吗（帧需求分级用：收敛过程必须保持 60fps，否则会卡在半路）。 */
-  get physicsBusy() {
-    return !this.bounce.settled || !this.trackH.settled || !this.trackV.settled
-  }
-
-  /**
-   * 物理后处理：只叠次级运动，不改状态、不改骨骼以外的任何东西。
-   * 步长由 Spring 内部按固定 1/60 积分（plan §6.6 纪律 ①）。
-   */
-  _physics(p, dt) {
-    const sink = this.bounce.step(0, dt)
-    if (sink) p.sink = (p.sink || 0) + sink
-  }
-
   /** 呼吸：指数逼近的权重 + 0.10 单位的上下起伏 + 头/臂的细微跟随。 */
   _breath(p, s, now, dt) {
     const want = s.breath ? 1 : 0
     this.breath += (want - this.breath) * (1 - Math.exp(-dt * (want > 0 ? 2.5 : 20)))
     if (this.breath < 0.001) this.breath = 0
-    // 呼吸相位漂移（P2）：周期不完全固定，看起来更"活"。只挪相位，振幅不变。
-    const drift = 0.18 * Math.sin(now * 0.13) + 0.09 * Math.sin(now * 0.37 + 1.7)
-    const wave = Math.sin(now * 1.7 + drift) * this.breath
+    const wave = Math.sin(now * 1.7) * this.breath
     p.breathing_bob = 0.1 * wave
     if (this.breath > 0) {
       p.head_rotation = Q.multiply(p.head_rotation, Q.fromEuler(wave * 0.012, 0, 0))
@@ -234,23 +201,13 @@ export class PetAnimator {
   _trackHead(p, ctx, s, now, dt) {
     const d = Math.max(dt || 0, 0)
     // 光标不在画布上：直接回中立（这条不需要过渡，否则指针一离开就残留偏角）
-    if (!ctx.cursor) {
-      this.trackW = 0
-      this.trackH.reset(0)
-      this.trackV.reset(0)
-      return
-    }
+    if (!ctx.cursor) { this.trackW = 0; return }
     // ctx.state 缺省时按 idle 处理（老调用点不传状态，语义上就是"默认状态"）
     const idle = ctx.state == null || ctx.state === 'idle'
     const want = (s.track && idle && !this.gestureBusy) ? 1 : 0
     this.trackW += (want - this.trackW) * (1 - Math.exp(-d / 0.12))
     if (this.trackW < 1e-3) this.trackW = 0
-    if (this.trackW === 0) {
-      // 权重归零时把弹簧也归零：手势/状态结束后不能带着旧角度的惯性
-      this.trackH.reset(0)
-      this.trackV.reset(0)
-      return
-    }
+    if (this.trackW === 0) return
 
     const W = ctx.width
     const H = ctx.height
@@ -273,11 +230,8 @@ export class PetAnimator {
       s.rangeY * DEG,
     )
     // 权重乘在角度上：trackW=0 时目标是严格中立，与状态姿态的 head_rotation 一致
-    const targetH = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
-    const targetV = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
-    // P2：角度过一层阻尼弹簧，转头有惯性、停下微微回弹（k=160 ζ=0.85，几乎不过冲）
-    const horizontal = s.physics ? this.trackH.step(targetH, d) : targetH
-    const vertical = s.physics ? this.trackV.step(targetV, d) : targetV
+    const horizontal = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
+    const vertical = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
 
     const desired = Q.multiply(
       Q.multiply(

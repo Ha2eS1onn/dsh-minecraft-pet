@@ -29,7 +29,6 @@ const MODULES = [
   { file: 'skin-render.js', varName: 'SKIN_RENDER' },
   { file: 'skin-model.js', varName: 'SKIN_MODEL' },
   { file: 'geo-model.js', varName: 'GEO_MODEL' },
-  { file: 'spring.js', varName: 'SPRING' },
   { file: 'type-letters.js', varName: 'TYPE_LETTERS' },
   { file: 'letters.js', varName: 'LETTERS' },
   { file: 'gestures.js', varName: 'GESTURES' },
@@ -106,7 +105,6 @@ function buildBundle() {
   parts.push('  render: SKIN_RENDER,')
   parts.push('  model: SKIN_MODEL,')
   parts.push('  geo: GEO_MODEL,')
-  parts.push('  spring: SPRING,')
   parts.push('  typeLetters: TYPE_LETTERS,')
   parts.push('  letters: LETTERS,')
   parts.push('  gestures: GESTURES,')

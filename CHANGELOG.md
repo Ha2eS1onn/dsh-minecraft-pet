@@ -2,7 +2,7 @@
 
 ## 0.4.0 — 2026-11-15
 
-**P2 三项全部完成**：敲字浮现字、阻尼弹簧物理模拟、Bedrock `.geo.json` 装饰模型。纯前端，宿主 `lib/` 一行未改，无需重启客户端（Ctrl+F5 即可）。
+**P2-c 敲字浮现字 + P2-b Bedrock `.geo.json` 装饰完成；P2-a 物理第一版按用户要求回退到 P1**（重做设计见 `docs/physics-redesign.md`）。纯前端，宿主 `lib/` 一行未改，无需重启客户端（Ctrl+F5 即可）。
 
 ### 新增
 
@@ -10,18 +10,24 @@
   - `assets/type-letters.js`：`keyLabelFromEvent`（中文输入法组合期 / `keyCode 229` / `Unidentified` 一律跳过）、6 行 74 键的物理键位表（`event.code` 索引，归一化到 19.6×7.8 键盘盒）、`buildGlyphs` + `canvasRasterizer`（离屏 canvas `bold 20px` → alpha ≥128 阈值化，24×24 白字模，首次约 5~10 ms 后缓存）
   - `assets/letters.js`：`LetterField`，0.8 s 生命、上限 64、糖果色 9 选 1、`alpha = 1 - t²`、上飘 10.8 单位、两遍绘制（暗色阴影 + 正色）。**多字符键名逐字符排版**（照 MDP `label()` 的墨迹宽度步进），所以 `Space` / `Enter` / `F12` 也能显示
   - 挂件：`keydown` → `pushLetter`，只在坐姿（`pose.sit > 0.4`）显示；字画在对应按键的键盘顶面坐标，顺序为 人物 → 状态粒子 → **浮现字** → 音符；有字时帧需求升到 60 fps
-- **P2-a 物理模拟**
-  - `assets/spring.js`：固定步长 1/60 + 累加器（单帧最多 8 子步）、可瞬间 `reset()`、收敛后吸附、`settled` 供帧需求分级。**MDP 里没有物理**，这块是照 `plan.md` §6.6 三条纪律新写的
-  - `pet-anim.js`：`done` 落地一次冲量 → 压缩回弹（k=140 ζ=0.5）、头部跟随过两层阻尼弹簧（k=160 ζ=0.85）、呼吸相位缓慢漂移；状态切换时全部归零，不带残留速度；`physicsBusy` 让回弹期间保持 60 fps
-  - `DEFAULT_ANIM.physics` 开关；关掉后动效与 P1 逐像素一致（`render-m0` 基线仍 `25928 px / c2c43ab4`）
 - **P2-b Bedrock `.geo.json` 装饰**
   - `assets/geo-model.js`：`parseGeo` / `pivotRotation` / `checkTextureSize` / `geoParts`。父骨骼可后定义（递归 + 缓存）、pivot 旋转 `T(p)·Rz·Ry·Rx·T(-p)`、Bedrock 前后轴 `rotY(π)` 双套转换、按摆姿后几何最低点对齐头顶、贴图尺寸与 `description.texture_*` 校验
   - `assets/decoration-duck.geo.json` + `decoration-duck.png`：自造的小鸭模型与贴图（无 Mojang 素材），菜单「装饰」多一档「小鸭」；模型或贴图加载失败只丢该装饰，不白屏
-- **验具**：`tools/test-geo.mjs`（22 项）、`tools/test-letters.mjs`（49 项）、`tools/make-geo-duck.mjs`（生成小鸭素材）；`test-anim` 补物理断言，`test-widget` **53 → 76 项**（含四个新模块真的在产物里、P2 接线、弹簧收敛、内嵌 geo 可解析）
+- **验具**：`tools/test-geo.mjs`（22 项）、`tools/test-letters.mjs`（49 项）、`tools/make-geo-duck.mjs`（生成小鸭素材）、**`tools/test-keydown.mjs`（17 项，真实派发 keydown 的 DOM stub 冒烟测试）**；`test-widget` **53 → 78 项**（含「物理已回退」的反向断言）
 - **对照图**：`prototype/p2-duck.png`（头顶小鸭）、`prototype/p2-letters.png`（坐姿 A / F / K / SPACE 四枚浮现字，2× 放大）
 
-### 修复（本轮自测抓到的）
+### 回退：P2-a 物理模拟
 
+用户真机试用后要求「物理先回退到 P1」。第一版不是 bug，而是**效果设计没有目标**：实测 `done` 落地回弹峰值只有 **0.345 单位（2.8 px）**、转头 ζ=0.85 **过冲 0°**，肉眼几乎无变化，却让 `physicsBusy` 把 idle 拉到 60 fps 长达 1.23 s；呼吸相位漂移还无条件开启，关掉开关也不是 P1 行为。
+
+- `assets/pet-anim.js` 恢复成 **356 行 P1 版本**，`tools/test-anim.mjs` 同步恢复（47 → 37 项）
+- `tools/build-widget.mjs` 摘掉 `spring.js`（`MODULES` 13 → 12）；`assets/widget.js` 去掉 `demand()` 的 `physicsBusy` 分支与探针字段，重建后 BUNDLE 2795 行 / 104142 B
+- `assets/spring.js` 保留源码但**未接线、未内联**，文件头标注「不要直接使用」
+- 新增 **`docs/physics-redesign.md`**：可见度门槛（12~24 px / 0.25~0.6s）、E1 落地压缩 / E2 起坐 / E3 转头惯性 / E4 error 抖动四个效果清单、`enabled` 默认关 + 基线逐像素守门、分阶段 A/B 验收。`plan.md` §6.6 已改为指向它
+
+### 修复（真机反馈 + 本轮自测）
+
+- **打字没有浮现字（用户实测）**：`document.addEventListener('keydown', function () {...})` 漏写了 `e` 形参，体内却调用 `pushLetter(e, ...)` → 抛 `ReferenceError` 被空 `catch` 吞掉。前四行打字动画照常执行，只有浮现字永远不出现、控制台还没线索。已补 `function (e)`、把异常写进 `window.__dshPetError`、新增 `letterStat` 诊断计数（`keys` / `noSit` / `noLabel` / `noPos` / `pushed` / `glyphs` / `error`）接进 `__dshPetState()`，并新增 `tools/test-keydown.mjs` 真实派发事件防回归
 - **`drawSprite` 的 tint 是 0..1 乘数**，第一版糖果色与阴影写成了 0..255，`Math.min(255, ...)` 后全部饱和成白色 —— 字和阴影都是白的。统一按 `rgb/255` 换算
 - **多字符键名永远画不出来**：`Space` / `Enter` 这类 label 在 94 个单字模里查不到整串。改成逐字符横排（与 MDP 一致）
 - **静止首帧白造 94 个字模**：`draw` 里改成只在 `letters.active` 时调 `glyphs()`
@@ -29,8 +35,9 @@
 
 ### 已知限制
 
-- **P2 只在 node 自测与静态对照图里验过，真机人眼验收未做**（挂件按 mtime 热读，Ctrl+F5 即可看）
-- 浮现字是**页面级**键盘：只响应 DSH 页面内的 `keydown`，切到别的应用不显示；中文输入法只出键名不出汉字（与 MDP 一致）
+- **P2-c / P2-b 只在 node 自测、静态对照图与 DOM stub 里验过，真机人眼验收未做**（挂件按 mtime 热读，Ctrl+F5 即可看）。若不出字，读 `window.__dshPetState().letterStat` 定位
+- 浮现字是**页面级**键盘：只响应 DSH 页面内的 `keydown`，切到别的应用不显示；中文输入法只出键名不出汉字（与 MDP 一致）。按规格**只在坐姿显示**：宿主处于 `thinking` / `waiting` 等状态时打字不抢状态、不会出字
+- **物理已回退**：本版不含物理效果，动画与 0.3.0 / P1 一致；重做前先按 `docs/physics-redesign.md` 确认「多大动静算看得见」
 - `.geo.json` 只支持 box UV（`cube.uv` 为 `[u,v]`）；per-face UV 对象形式直接报错。目前只带了一个自造小鸭模型
 - 24 px 的字宽略大于 60% 键盘的键距，快速连打时相邻字会部分重叠 —— 靠 0.8 s 内的上升时间与糖果色区分，与 MDP 行为一致
 

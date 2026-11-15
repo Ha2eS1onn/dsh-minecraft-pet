@@ -22,8 +22,8 @@
 
 | 文件 | 来源 / 说明 |
 |---|---|
-| `assets/quat.js`、`skin-render.js`、`skin-model.js`、`pet-state.js`、`pet-anim.js`、`effects.js`、`decorations.js`、`gestures.js`、`status-effects.js`、`spring.js`、`geo-model.js`、`type-letters.js`、`letters.js` | 本项目自写（MIT）；渲染、动效、geo 解析与浮现字的**数学/数据结构**移植自 Minecraft-Desktop-Pet（MIT，commit `63c96a8`），逐文件表见 `THIRD_PARTY_NOTICES.md`。`spring.js` 例外：MDP 无物理，纯本项目新写 |
-| `assets/widget.js` | 本项目自写（MIT）。顶部 BUNDLE 段由 `tools/build-widget.mjs` 生成，内含上面 13 个模块 |
+| `assets/quat.js`、`skin-render.js`、`skin-model.js`、`pet-state.js`、`pet-anim.js`、`effects.js`、`decorations.js`、`gestures.js`、`status-effects.js`、`spring.js`、`geo-model.js`、`type-letters.js`、`letters.js` | 本项目自写（MIT）；渲染、动效、geo 解析与浮现字的**数学/数据结构**移植自 Minecraft-Desktop-Pet（MIT，commit `63c96a8`），逐文件表见 `THIRD_PARTY_NOTICES.md`。`spring.js` 例外：MDP 无物理，纯本项目新写，且**当前未接线**（物理已回退，见 `docs/physics-redesign.md`） |
+| `assets/widget.js` | 本项目自写（MIT）。顶部 BUNDLE 段由 `tools/build-widget.mjs` 生成，内联上面清单中除 `spring.js` 外的 12 个模块 |
 | `assets/note.png`（132 B） | Minecraft Java 的粒子贴图，belongs to Mojang/Microsoft |
 | `assets/heart.png`（139 B） | 爱心装饰形状，belongs to Mojang/Microsoft |
 | `assets/default-skin.png`（1354 B） | 用户自备皮肤 |

@@ -23,8 +23,9 @@
 系统级音频采集与音效；音符改为「宿主报告有音频才生成」；新增 DSH 会话六态 → 姿态映射；
 字模改用浏览器离屏 canvas 光栅化替代 GDI / AppKit；`.geo.json` 只实现 box UV 子集。
 
-`assets/spring.js`（P2-a 阻尼弹簧）**为本项目自写**：MDP 全项目没有物理模拟，
-这块按 `docs/plan.md` §6.6 的三条纪律新写，非移植。
+`assets/spring.js`（P2-a 第一版阻尼弹簧）**为本项目自写**：MDP 全项目没有物理模拟，
+这块按 `docs/plan.md` §6.6 的三条纪律新写，非移植。该文件于 2026-11-15 随物理回退**解除接线**
+（`pet-anim.js` 不再 import、不进挂件产物），保留源码仅供重做时参考，见 `docs/physics-redesign.md`。
 
 `lib/audio-meter.ps1` 借鉴 **dsh-whale-states** <https://github.com/MeteorNOX/dsh-whale-states>
 （MIT，© MeteorNOX，commit `f7d6516`）的 WASAPI 峰值轮询做法，本项目重写为独立脚本。
