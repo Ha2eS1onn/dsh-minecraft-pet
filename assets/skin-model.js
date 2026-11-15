@@ -100,7 +100,7 @@ export { baseBody, torsoSpace, bodySpace }
 export function buildParts(
   pose,
   skin,
-  { outer = true, armWidth = 4, keyboard: keyboardOn = true, keycaps = true } = {},
+  { outer = true, armWidth = 4, keyboard: keyboardOn = true, keycaps = true, cape = null } = {},
 ) {
   const p = pose || defaultPose()
   const legacy = !!skin?.legacy
@@ -174,6 +174,29 @@ export function buildParts(
       ),
       left && legacy,
     )
+  }
+
+  // 披风（M5，plan.md §7.5）：10×16×1 薄板挂在背后。
+  // 尺寸/挂载/倾角照抄 MDP render.rs:1438；UV 起点**故意与 MDP 不同**（0 而不是 -11）：
+  //   MDP 取 -11 让 -Z 面落在官方图案区 (1,1)，因为它的模型能转身、从背面看；
+  //   本项目视角固定在正面（相机永远在 +Z），-Z 面永远背对用户，照抄的话用户永远
+  //   看不到自己的披风图案。取 0 后 +Z（朝向相机）落在 (1,1) 图案区、-Z 落在 (12,1)
+  //   内衬区、±X 落在两侧边条，与官方贴图布局一一对应。
+  // 代价：从背后看会「里外反了」——本项目没有从背后看的机会，可接受。
+  if (cape) {
+    parts.push({
+      key: 'cape',
+      cape: true,
+      size: [10, 16, 1],
+      uv: [0, 0],
+      transform: multiply(
+        multiply(bodySpace(p), translate(0, 3.6, -2.9)),
+        Q.toMatrix(Q.rotX(0.14)),
+      ),
+      inflate: 0,
+      mirror: false,
+      texture: cape,
+    })
   }
 
   // 眼皮薄片：只有画过识别格的皮肤才画（render.rs:2010 `eyelid()`）。

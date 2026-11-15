@@ -9,6 +9,11 @@
 // 可选环境变量：
 //   HARNESS_SKIN=prototype/da-skin.png      换一张皮肤
 //   HARNESS_ROLE_META=path/to/meta.json     换角色名 / slim
+//   HARNESS_CAPE=path/to/cape.png           给挂件一张披风（任意 64×32 PNG）
+//   HARNESS_ACCOUNT=Notch                   假装已绑定账号（菜单里显示名字）
+//
+// 账号接口在这里是**假的**：POST 不联网，直接把输入的用户名当成绑定成功，
+// 用来验前端面板与重拉流程。真实链路见 lib/skin-account.mjs 与 tools/test-host.mjs。
 
 import http from 'node:http'
 import fs from 'node:fs'
@@ -53,6 +58,48 @@ function readRoleMeta() {
 // 状态时间表：?seq=thinking,idle —— 每 3 次 state 请求（约 3 秒）推进一步，
 // 用来验「降级能不能走通」（进入 thinking 后回 idle）。
 const seqCursor = new Map()
+
+function capeBytes() {
+  try {
+    return process.env.HARNESS_CAPE ? fs.readFileSync(path.resolve(ROOT, process.env.HARNESS_CAPE)) : null
+  } catch (err) {
+    return null
+  }
+}
+
+let harnessAccount = { bound: !!process.env.HARNESS_ACCOUNT, name: process.env.HARNESS_ACCOUNT || '' }
+function accountPayload() {
+  const meta = readRoleMeta()
+  const cape = capeBytes()
+  return {
+    ok: true,
+    bound: harnessAccount.bound,
+    name: harnessAccount.name,
+    uuid: harnessAccount.bound ? '00000000000000000000000000000000' : '',
+    model: meta.model,
+    hasCape: !!cape,
+    cape: cape ? 'on' : 'none',
+    boundAt: harnessAccount.bound ? Date.now() : 0,
+    error: '',
+  }
+}
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      if (!raw) return resolve({})
+      try {
+        resolve(JSON.parse(raw))
+      } catch (err) {
+        resolve({})
+      }
+    })
+    req.on('error', () => resolve({}))
+  })
+}
 
 function api(req, res, url) {
   const p = url.pathname
@@ -100,7 +147,31 @@ function api(req, res, url) {
   }
   if (p === '/pet/role.json') {
     const meta = readRoleMeta()
-    return json(res, { ok: true, name: meta.name, model: meta.model, hasCape: false })
+    return json(res, { ok: true, name: meta.name, model: meta.model, hasCape: !!capeBytes(), account: harnessAccount.bound ? harnessAccount.name : '' })
+  }
+  if (p === '/pet/cape.png') {
+    const bytes = capeBytes()
+    if (!bytes) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+      return res.end('no cape')
+    }
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache', 'Content-Length': String(bytes.length) })
+    return res.end(bytes)
+  }
+  if (p === '/pet/account.json') {
+    if (req.method === 'POST') {
+      readBody(req).then((body) => {
+        const account = String((body && body.account) || '').trim()
+        harnessAccount = { bound: !!account, name: account }
+        json(res, accountPayload())
+      })
+      return
+    }
+    if (req.method === 'DELETE') {
+      harnessAccount = { bound: false, name: '' }
+      return json(res, accountPayload())
+    }
+    return json(res, accountPayload())
   }
   if (p === '/pet/skin.png') {
     const bytes = fs.readFileSync(path.resolve(ROOT, process.env.HARNESS_SKIN || 'assets/default-skin.png'))

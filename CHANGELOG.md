@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.0 — 2026-11-15
+
+**M5 正版账号披风**：输入 Java 版用户名或 UUID，拉取该账号的皮肤 + 模型类型 + 披风，全在本机。
+
+### 新增
+
+- `lib/skin-account.mjs`（233 行）：`parseIdentity` / `textureHash` / `decodeTextures` / `pngInfo` / `validateSkin` / `validateCape` / `request` / `bindAccount`。六条安全要求逐条落地——官方纹理域名白名单（只认 `textures.minecraft.net/texture/<hex>`，**http 与 https 写法都接受**，因为 Mojang 真实返回是 `http://`；下载一律重写成 https）、hash 全 hex 且 ≤128、每跳限大小（128 KB / 8 MB / 2 MB）、`redirect: 'manual'` 不跟随重定向、披风失败不算失败、输入只认 `[A-Za-z0-9_]{1,16}` 或 32 位 hex
+- `GET/POST/DELETE /pet/account.json`：读绑定状态 / 绑定（空串或 DELETE 为解绑）
+- `GET /pet/cape.png`：披风字节，没有就 404；`role.json` 的 `hasCape` 改为真实值，并新增 `account` 字段
+- 披风渲染：`skin-model.js` 追加 10×16×1 薄板（挂在躯干空间），`drawParts` 支持 `part.texture` 换采样，几何与 UV 规格见 `docs/plan.md` §7.5
+- 挂件菜单：「披风」开关 + 「正版账号」内联面板（输入框 / 绑定 / 解绑 / 状态提示）
+- `tools/test-cape.mjs`（32 项）：披风几何/UV、六个状态下的可见性、HD 披风、以及「不传披风时基线一像素不变」
+- `tools/compare-cape.mjs`：三联对照图 `prototype/m5-cape.png`（自造披风贴图，不含任何 Mojang 素材）
+
+### 变更
+
+- 绑定会覆盖本机 `skin.png`，但先把原皮肤备份成 `skin.local.png`；解绑时还原，名字与模型类型一起回到绑定前
+- 绑定失败不写盘：断网 / 404 / 超限 / 重定向被拒都只返回 `ok:false` + 人话原因，人物照常显示
+- `package.json` `files` 补上 `lib/skin-account.mjs`
+
+### 已知限制
+
+- 披风是从正面视角渲染的：项目没有模型旋转，相机永远在 +Z，因此披风只在腰侧露出一条（站姿约 248 px、坐姿约 685 px），图案区落在朝向相机的那一面（`uv = [0,0]`，与 MDP 的 `-11` 不同，理由见 `plan.md` §7.5）
+- DSH 客户端菜单里的绑定面板还没人点过（宿主改动需重启客户端）；底层链路已用 `jeb_` / `Dinnerbone` / `Grumm` 三个真实账号验过：皮肤与披风均能拉取、落盘、渲染，解绑能逐字节还原原皮肤
+
 ## 0.2.0 — 2026-11-15
 
 **独立化重写**：宿主与前端全部自写，不再复制 `dsh-whale-states` 的代码。

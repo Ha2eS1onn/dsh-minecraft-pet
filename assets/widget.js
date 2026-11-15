@@ -544,7 +544,9 @@ function drawParts(frame, parts, skin) {
   for (const part of parts) {
     if (part.kind === 'quad') drawQuad(frame, part, skin)
     else if (part.solid) drawBox(frame, part, solidSkin(part.solid))
-    else drawBox(frame, part, skin)
+    // part.texture：自带贴图的 part（披风）。与 solid 同一个分发思路，
+    // 明暗 LUT、三角形填充、深度测试全部复用，不另写一条绘制路径。
+    else drawBox(frame, part, part.texture || skin)
   }
 }
 
@@ -799,7 +801,7 @@ function bodySpace(p) {
 function buildParts(
   pose,
   skin,
-  { outer = true, armWidth = 4, keyboard: keyboardOn = true, keycaps = true } = {},
+  { outer = true, armWidth = 4, keyboard: keyboardOn = true, keycaps = true, cape = null } = {},
 ) {
   const p = pose || defaultPose()
   const legacy = !!skin?.legacy
@@ -873,6 +875,29 @@ function buildParts(
       ),
       left && legacy,
     )
+  }
+
+  // 披风（M5，plan.md §7.5）：10×16×1 薄板挂在背后。
+  // 尺寸/挂载/倾角照抄 MDP render.rs:1438；UV 起点**故意与 MDP 不同**（0 而不是 -11）：
+  //   MDP 取 -11 让 -Z 面落在官方图案区 (1,1)，因为它的模型能转身、从背面看；
+  //   本项目视角固定在正面（相机永远在 +Z），-Z 面永远背对用户，照抄的话用户永远
+  //   看不到自己的披风图案。取 0 后 +Z（朝向相机）落在 (1,1) 图案区、-Z 落在 (12,1)
+  //   内衬区、±X 落在两侧边条，与官方贴图布局一一对应。
+  // 代价：从背后看会「里外反了」——本项目没有从背后看的机会，可接受。
+  if (cape) {
+    parts.push({
+      key: 'cape',
+      cape: true,
+      size: [10, 16, 1],
+      uv: [0, 0],
+      transform: multiply(
+        multiply(bodySpace(p), translate(0, 3.6, -2.9)),
+        Q.toMatrix(Q.rotX(0.14)),
+      ),
+      inflate: 0,
+      mirror: false,
+      texture: cape,
+    })
   }
 
   // 眼皮薄片：只有画过识别格的皮肤才画（render.rs:2010 `eyelid()`）。
@@ -2242,7 +2267,9 @@ return {
     balance: '/pet/balance.json',
     role: '/pet/role.json',
     skin: '/pet/skin.png',
+    cape: '/pet/cape.png',
     audio: '/pet/audio-active.json',
+    account: '/pet/account.json',
   }
   var W = 352
   var H = 416
@@ -2257,6 +2284,7 @@ return {
     bubble: 'dshmp-bubble',
     menu: 'dshmp-menu',
     deco: 'dshmp-deco',
+    cape: 'dshmp-cape',
   }
   var SCALES = [0.7, 0.85, 1, 1.15, 1.3]
   var DECOS = ['none', 'rabbit', 'cat', 'heart', 'lollipop']
@@ -2272,7 +2300,7 @@ return {
   var pierceBtn = null
 
   var eng = null // 渲染引擎
-  var opts = { scale: 1, flip: false, pierce: false, bubble: true, menuHidden: false, deco: 'none', x: -1, y: -1 }
+  var opts = { scale: 1, flip: false, pierce: false, bubble: true, menuHidden: false, deco: 'none', cape: true, x: -1, y: -1 }
   var hostState = 'idle' // 宿主上报的六态
   var pendingState = '' // 连续两次同一状态才 force（过滤宿主抖动）
   var cursor = null
@@ -2282,6 +2310,8 @@ return {
   var balance = null
   var noteTex = null
   var heartTex = null
+  var account = null // /pet/account.json 的快照
+  var accountBusy = false
   var frameTimer = 0
   var frameRaf = false
   var pollTimer = 0
@@ -2387,7 +2417,20 @@ return {
     '.dshmp-step i:hover{background:rgba(255,255,255,.16)}' +
     '.dshmp-resume{position:fixed;right:10px;bottom:8px;width:26px;height:26px;border-radius:50%;' +
     'background:rgba(22,22,26,.85);border:1px solid rgba(255,255,255,.16);color:#cfcfd6;' +
-    'font-size:12px;line-height:24px;text-align:center;cursor:pointer;z-index:2147483001}'
+    'font-size:12px;line-height:24px;text-align:center;cursor:pointer;z-index:2147483001}' +
+    // 账号面板（M5）
+    '.dshmp-acct{display:none;padding:2px 7px 6px}' +
+    '.dshmp-acct.on{display:block}' +
+    '.dshmp-input{width:100%;box-sizing:border-box;padding:4px 6px;border-radius:6px;' +
+    'border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.3);color:#e8e8ea;' +
+    'font:12px system-ui,sans-serif;outline:none}' +
+    '.dshmp-input:focus{border-color:rgba(120,190,255,.5)}' +
+    '.dshmp-acct-row{display:flex;gap:6px;margin-top:6px}' +
+    '.dshmp-go{flex:1;padding:4px 0;border-radius:6px;cursor:pointer;font:12px system-ui,sans-serif;' +
+    'border:1px solid rgba(120,190,255,.4);background:rgba(90,170,255,.22);color:#cfe6ff}' +
+    '.dshmp-go.ghost{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.16);color:#cfcfd6}' +
+    '.dshmp-go[disabled]{opacity:.5;cursor:default}' +
+    '.dshmp-acct-msg{margin-top:5px;font-size:11px;line-height:1.4;color:#9cc9ff;word-break:break-all}'
 
   function injectCss() {
     if (document.getElementById('dshmp-style')) return
@@ -2430,7 +2473,7 @@ return {
   function init() {
     // 每一步单独 try：装修建 DOM 这种「一步失败就全灭」的写法，出问题时页面上什么线索都没有
     // （R2 第一版就是 `startFrameLoop()` 这个不存在的函数把 init 整个炸掉，画布全透明）。
-    var steps = [injectCss, readOpts, buildDom, bindGlobal, loadRole]
+    var steps = [injectCss, readOpts, buildDom, bindGlobal, loadRole, loadAccount]
     for (var i = 0; i < steps.length; i++) {
       try {
         steps[i]()
@@ -2447,6 +2490,7 @@ return {
     opts.bubble = get(LS.bubble, '1') !== '0'
     opts.menuHidden = get(LS.menu, '0') === '1'
     opts.deco = DECOS.indexOf(get(LS.deco, 'none')) >= 0 ? get(LS.deco, 'none') : 'none'
+    opts.cape = get(LS.cape, '1') !== '0'
     var p = String(get(LS.pos, '') || '').split(',')
     opts.x = isFinite(Number(p[0])) && p[0] !== '' ? Number(p[0]) : -1
     opts.y = isFinite(Number(p[1])) && p[1] !== '' ? Number(p[1]) : -1
@@ -2468,6 +2512,16 @@ return {
       '<div class="dshmp-row" data-row="pierce"><span>鼠标穿透</span><b data-pierce>关</b></div>' +
       '<div class="dshmp-row" data-row="bubble"><span>余额气泡</span><b data-bubble>开</b></div>' +
       '<div class="dshmp-row" data-row="deco"><span>装饰</span><b data-deco>无</b></div>' +
+      '<div class="dshmp-row" data-row="cape"><span>披风</span><b data-cape>无</b></div>' +
+      '<div class="dshmp-row" data-row="account"><span>正版账号</span><b data-account>未绑定</b></div>' +
+      '<div class="dshmp-acct" data-acct-panel>' +
+      '<input class="dshmp-input" data-acct-input placeholder="Java 版用户名 / UUID" maxlength="64" spellcheck="false">' +
+      '<div class="dshmp-acct-row">' +
+      '<button class="dshmp-go" data-acct-bind>绑定</button>' +
+      '<button class="dshmp-go ghost" data-acct-unbind>解绑</button>' +
+      '</div>' +
+      '<div class="dshmp-acct-msg" data-acct-msg></div>' +
+      '</div>' +
       '<div class="dshmp-row" data-row="reset"><span>重置位置</span></div>' +
       '</div>'
     var host = document.body || document.documentElement
@@ -2512,6 +2566,7 @@ return {
     root.querySelector('[data-bubble]').textContent = opts.bubble ? '开' : '关'
     root.querySelector('[data-deco]').textContent =
       ({ none: '无', rabbit: '兔耳', cat: '猫耳', heart: '爱心', lollipop: '棒棒糖' })[opts.deco] || '无'
+    renderAccount()
     if (btnEl) btnEl.style.display = opts.menuHidden ? 'none' : ''
     if (opts.pierce) ensureResumeBtn()
     else removeResumeBtn()
@@ -2544,7 +2599,7 @@ return {
   // ---------------------------------------------------------------- 皮肤
 
   function loadRole() {
-    fetchJson(API.role)
+    return fetchJson(API.role)
       .then(function (role) {
         return imgFromUrl(API.skin + '?t=' + Date.now()).then(function (im) {
           return { role: role, im: im }
@@ -2562,6 +2617,9 @@ return {
         eng = {
           skin: skin,
           armWidth: r.role && r.role.model === 'slim' ? 3 : 4,
+          // 披风纹理（M5）：只在 role.json 说 hasCape 时去拉，404 就当没有
+          capeTex: null,
+          capeOn: !!(r.role && r.role.hasCape),
           frame: R.createFrame(W, H),
           machine: new (load().state.PetStateMachine)(performance.now()),
           anim: new (load().anim.PetAnimator)(0),
@@ -2569,7 +2627,21 @@ return {
           status: new (load().status.StatusEffects)(),
           lastMs: 0,
         }
-        return Promise.all([textureFromUrl(load().assets.note), textureFromUrl(load().assets.heart)]).then(function (tex) {
+        var capeReady = eng.capeOn
+          ? textureFromUrl(API.cape + '?t=' + Date.now())
+              .then(function (tex) {
+                eng.capeTex = tex
+              })
+              .catch(function () {
+                // 披风拉不到就静默降级：人物照常，只是没有披风（plan.md §7.4）
+                eng.capeTex = null
+              })
+          : Promise.resolve()
+        return Promise.all([
+          textureFromUrl(load().assets.note),
+          textureFromUrl(load().assets.heart),
+          capeReady,
+        ]).then(function (tex) {
           noteTex = tex[0]
           heartTex = tex[1]
           scheduleFrame()
@@ -2592,6 +2664,106 @@ return {
       var d = cx.getImageData(0, 0, c.width, c.height)
       return load().render.textureFromImage({ width: c.width, height: c.height, data: d.data })
     })
+  }
+
+  // ---------------------------------------------------------------- 正版账号 / 披风（M5）
+
+  function acctMsg(text) {
+    var el = menuEl && menuEl.querySelector('[data-acct-msg]')
+    if (el) el.textContent = text || ''
+  }
+
+  function acctBusy(busy, text) {
+    accountBusy = busy
+    var bind = menuEl && menuEl.querySelector('[data-acct-bind]')
+    var unbind = menuEl && menuEl.querySelector('[data-acct-unbind]')
+    if (bind) bind.disabled = busy
+    if (unbind) unbind.disabled = busy
+    if (text) acctMsg(text)
+  }
+
+  function renderAccount() {
+    if (!menuEl) return
+    var nameEl = menuEl.querySelector('[data-account]')
+    if (nameEl) nameEl.textContent = account && account.bound ? account.name : '未绑定'
+    var capeEl = menuEl.querySelector('[data-cape]')
+    if (capeEl) capeEl.textContent = !(account && account.hasCape) ? '无' : opts.cape ? '开' : '关'
+  }
+
+  function loadAccount() {
+    return fetchJson(API.account)
+      .then(function (d) {
+        account = d || null
+        renderAccount()
+      })
+      .catch(function () {
+        account = null
+        renderAccount()
+      })
+  }
+
+  /**
+   * 绑定：只发一次请求（plan.md §7.2「不轮询」）。宿主侧失败不写盘，
+   * 所以这里失败时除了提示什么都不用回滚。
+   */
+  function bindAccountNow() {
+    if (accountBusy) return
+    var input = menuEl.querySelector('[data-acct-input]')
+    var value = String((input && input.value) || '').trim()
+    if (!value) {
+      acctMsg('请输入 Java 版用户名或 UUID')
+      return
+    }
+    acctBusy(true, '正在向官方服务拉取…')
+    fetch(API.account, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account: value }),
+    })
+      .then(function (r) {
+        return r.json()
+      })
+      .then(function (d) {
+        if (!d || !d.ok) {
+          acctMsg((d && d.error) || '绑定失败')
+          return null
+        }
+        account = d
+        opts.cape = true
+        set(LS.cape, '1')
+        applyOpts()
+        acctMsg(d.capeError ? '已绑定 ' + d.name + '，披风没拉到：' + d.capeError : '已绑定 ' + d.name)
+        showToast('已绑定 ' + d.name)
+        return loadRole()
+      })
+      .catch(function (err) {
+        acctMsg('请求失败：' + String((err && err.message) || err))
+      })
+      .then(function () {
+        acctBusy(false)
+      })
+  }
+
+  function unbindAccountNow() {
+    if (accountBusy) return
+    acctBusy(true, '正在解绑…')
+    fetch(API.account, { method: 'DELETE', credentials: 'same-origin' })
+      .then(function (r) {
+        return r.json()
+      })
+      .then(function (d) {
+        account = d && d.ok ? d : null
+        acctMsg('已解绑，皮肤回到本地版本')
+        renderAccount()
+        return loadRole()
+      })
+      .catch(function (err) {
+        acctMsg('请求失败：' + String((err && err.message) || err))
+      })
+      .then(function () {
+        acctBusy(false)
+      })
   }
 
   // ---------------------------------------------------------------- 轮询
@@ -2802,7 +2974,11 @@ return {
     var R = P.render
     var frame = eng.frame
     R.clearFrame(frame)
-    var parts = P.model.buildParts(pose, eng.skin, { outer: true, armWidth: eng.armWidth })
+    var parts = P.model.buildParts(pose, eng.skin, {
+      outer: true,
+      armWidth: eng.armWidth,
+      cape: opts.cape ? eng.capeTex : null,
+    })
     var head = null
     for (var i = 0; i < parts.length; i++) {
       if (parts[i].key === 'head' && !parts[i].inflate) head = parts[i]
@@ -2865,6 +3041,15 @@ return {
       e.stopPropagation()
     })
     menuEl.addEventListener('click', function (e) {
+      // 账号面板里的两个按钮先处理（它们没有 data-row，会落到下面的分支之外）
+      if (e.target.hasAttribute && e.target.hasAttribute('data-acct-bind')) {
+        bindAccountNow()
+        return
+      }
+      if (e.target.hasAttribute && e.target.hasAttribute('data-acct-unbind')) {
+        unbindAccountNow()
+        return
+      }
       var step = e.target.getAttribute && e.target.getAttribute('data-step')
       if (step) {
         var i = SCALES.indexOf(opts.scale)
@@ -2891,6 +3076,13 @@ return {
       } else if (k === 'deco') {
         opts.deco = DECOS[(DECOS.indexOf(opts.deco) + 1) % DECOS.length]
         set(LS.deco, opts.deco)
+      } else if (k === 'cape') {
+        opts.cape = !opts.cape
+        set(LS.cape, opts.cape ? '1' : '0')
+      } else if (k === 'account') {
+        var panel = menuEl.querySelector('[data-acct-panel]')
+        if (panel) panel.className = 'dshmp-acct' + (panel.className.indexOf('on') >= 0 ? '' : ' on')
+        return
       } else if (k === 'reset') {
         opts.x = -1
         opts.y = -1
@@ -3017,6 +3209,9 @@ return {
         state: eng.machine.state,
         hostState: hostState,
         skin: eng.skin.width + 'x' + eng.skin.height,
+        cape: !!eng.capeTex,
+        capeTexture: eng.capeTex ? eng.capeTex.width + 'x' + eng.capeTex.height : '',
+        account: account && account.bound ? account.name : '',
         eyelid: eng.anim.eyelid,
         presses: eng.anim.counter,
         deco: opts.deco,

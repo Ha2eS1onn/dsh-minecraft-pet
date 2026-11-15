@@ -12,6 +12,7 @@ DSH（DeepSeek Harness）界面右下角的 **Minecraft 方块小人挂件**。
 
 - **六态**：`idle` / `thinking` / `working` / `waiting` / `done` / `error`，优先级与最短停留沿用 DSH 会话语义
 - **动效**：呼吸、眨眼（需皮肤画了 DA 识别格）、头部跟随鼠标、打字手臂交替、待机手势（伸懒腰 / 歪头 / 犯困）、音符、状态粒子、装饰（兔耳 / 猫耳 / 爱心 / 棒棒糖）
+- **正版披风**：右键菜单 →「正版账号」，输入 Java 版用户名或 UUID，拉取该账号的皮肤、模型类型（classic/slim）与披风；解绑自动还原本地皮肤
 - **余额**：账号余额、今日已用、峰谷时段标记；拿不到数据时显示 `--`，不挡其他功能
 - **每轮消耗**：一轮结束后弹出「本轮 ¥0.00xx · N tok」
 - **交互**：拖动 + 吸附、5 档缩放、水平翻转、鼠标穿透（留一个 ⟲ 恢复点）、右键菜单
@@ -33,19 +34,28 @@ dsh plugin --profile desktop add link:D:/path/to/dsh-minecraft-pet
 | 位置 | 用途 |
 |---|---|
 | `$DSH_HOME/pet-role/skin.png` + `meta.json` | 角色皮肤与模型类型（`classic` / `slim`）。首次启动时若为空，会从旧版 `whale-roles/default/` 复制一份 |
+| `$DSH_HOME/pet-role/cape.png` | 绑定账号后拉到的披风（仅本机缓存，不随包分发）；解绑即删除 |
+| `$DSH_HOME/pet-role/skin.local.png` | 绑定前的本地皮肤备份，解绑时还原 |
 | `$DSH_HOME/.dsh-pet-state.json` | 今日已用与轮次序号（按北京日切） |
-| 浏览器 `localStorage` `dshmp-*` | 位置、缩放、翻转、穿透、气泡开关、装饰 |
+| 浏览器 `localStorage` `dshmp-*` | 位置、缩放、翻转、穿透、气泡开关、装饰、披风开关 |
 
-接口（全部只读，走 DSH 既有鉴权）：
+接口（除账号绑定外全部只读，走 DSH 既有鉴权）：
 
 ```
 GET /pet/state.json         { ok, state, since, pending, turnCost }
 GET /pet/balance.json       { ok, balance, currency, todayUsed, period, peak, valley, nextChangeAt, at, error }
-GET /pet/role.json          { ok, name, model, hasCape }
+GET /pet/role.json          { ok, name, model, hasCape, account }
 GET /pet/skin.png           皮肤字节（缺则回内置默认）
+GET /pet/cape.png           披风字节（没有就 404）
 GET /pet/audio-active.json  { ok, active, peak }
 GET /pet/widget.js          挂件本体
+
+GET    /pet/account.json    { ok, bound, name, uuid, model, hasCape, cape, boundAt, error }
+POST   /pet/account.json    { account: "用户名或 UUID" } → 绑定拉取；account 为空串等同解绑
+DELETE /pet/account.json    解绑并还原本地皮肤
 ```
+
+账号绑定只在用户点「绑定」时向官方服务请求一次，不轮询；失败不写盘，人物不受影响。
 
 ## 开发
 
@@ -57,8 +67,11 @@ node tools/test-quat.mjs        # 四元数
 node tools/test-state.mjs       # 状态机
 node tools/test-anim.mjs        # 动效
 node tools/test-m35.mjs         # 眨眼 / 音符 / 装饰 / 手势 / 粒子
-node tools/test-host.mjs        # 宿主：六条路由 + 状态机 + 计费 + 栅栏
+node tools/test-cape.mjs        # 披风几何 / UV / 无披风时基线不变
+node tools/test-host.mjs        # 宿主：路由 + 状态机 + 计费 + 栅栏 + 账号绑定（假 fetch）
 node tools/test-widget.mjs      # 挂件：语法 / 产物求值 / 接线 / 未定义函数扫描
+
+node tools/compare-cape.mjs     # 披风三联对照图 → prototype/m5-cape.png
 ```
 
 设计取舍与踩过的坑都在 [`docs/HANDOFF.md`](docs/HANDOFF.md)，施工说明书是 [`docs/plan.md`](docs/plan.md)。

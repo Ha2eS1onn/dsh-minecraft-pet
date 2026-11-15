@@ -1,7 +1,7 @@
 {
   "name": "dsh-minecraft-pet",
-  "version": "0.2.0",
-  "description": "DSH 界面右下角的 Minecraft 方块小人挂件：64×64 皮肤实时 Canvas 光栅化、六态姿态与动效、音符/装饰/待机手势/状态粒子，外加账号余额、今日已用、峰谷时段与每轮消耗提示",
+  "version": "0.3.0",
+  "description": "DSH 界面右下角的 Minecraft 方块小人挂件：64×64 皮肤实时 Canvas 光栅化、六态姿态与动效、音符/装饰/待机手势/状态粒子、正版账号披风，外加账号余额、今日已用、峰谷时段与每轮消耗提示",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -17,6 +17,7 @@
   "files": [
     "lib/index.js",
     "lib/pet-data.mjs",
+    "lib/skin-account.mjs",
     "lib/audio-meter.ps1",
     "assets",
     "icon.png",

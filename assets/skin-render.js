@@ -397,7 +397,9 @@ export function drawParts(frame, parts, skin) {
   for (const part of parts) {
     if (part.kind === 'quad') drawQuad(frame, part, skin)
     else if (part.solid) drawBox(frame, part, solidSkin(part.solid))
-    else drawBox(frame, part, skin)
+    // part.texture：自带贴图的 part（披风）。与 solid 同一个分发思路，
+    // 明暗 LUT、三角形填充、深度测试全部复用，不另写一条绘制路径。
+    else drawBox(frame, part, part.texture || skin)
   }
 }
 

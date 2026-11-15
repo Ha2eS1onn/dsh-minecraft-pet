@@ -86,9 +86,15 @@ if (PET) {
 
 // ③ 接线
 const shell = src.slice(e >= 0 ? e : 0)
-for (const p of ['/pet/state.json', '/pet/balance.json', '/pet/role.json', '/pet/skin.png', '/pet/audio-active.json']) {
+for (const p of ['/pet/state.json', '/pet/balance.json', '/pet/role.json', '/pet/skin.png', '/pet/cape.png', '/pet/audio-active.json', '/pet/account.json']) {
   check(`挂件请求 ${p}`, src.indexOf(p) >= 0)
 }
+// M5 接线：菜单入口 + 把披风纹理递给 buildParts
+check('菜单有披风开关与账号入口', shell.indexOf('data-row="cape"') >= 0 && shell.indexOf('data-row="account"') >= 0)
+check('账号面板有绑定/解绑按钮', shell.indexOf('data-acct-bind') >= 0 && shell.indexOf('data-acct-unbind') >= 0)
+check('draw 时把披风纹理传进 buildParts', shell.indexOf('cape: opts.cape ? eng.capeTex : null') >= 0)
+check('绑定失败不会清掉已有皮肤（只在 ok 后重拉）', shell.indexOf("if (!d || !d.ok)") >= 0 && shell.indexOf('return loadRole()') >= 0)
+check('披风开关持久化用 dshmp-cape', shell.indexOf("cape: 'dshmp-cape'") >= 0)
 check('localStorage 统一用 dshmp- 前缀', (src.match(/'dshmp-/g) || []).length >= 5)
 check('不残留 DWS 的 storage 前缀 dshw-', src.indexOf("'dshw") < 0)
 check('不残留 DWS 的 CSS 类名 dshwv-', src.indexOf('dshwv-') < 0)
