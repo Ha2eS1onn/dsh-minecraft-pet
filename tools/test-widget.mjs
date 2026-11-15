@@ -93,7 +93,11 @@ for (const p of ['/pet/state.json', '/pet/balance.json', '/pet/role.json', '/pet
 check('菜单有披风开关与账号入口', shell.indexOf('data-row="cape"') >= 0 && shell.indexOf('data-row="account"') >= 0)
 check('账号面板有绑定/解绑按钮', shell.indexOf('data-acct-bind') >= 0 && shell.indexOf('data-acct-unbind') >= 0)
 check('draw 时把披风纹理传进 buildParts', shell.indexOf('cape: opts.cape ? eng.capeTex : null') >= 0)
-check('绑定失败不会清掉已有皮肤（只在 ok 后重拉）', shell.indexOf("if (!d || !d.ok)") >= 0 && shell.indexOf('return loadRole()') >= 0)
+check('绑定失败会显式提示，不会静默吞掉', shell.indexOf('if (!d || !d.ok)') >= 0 && shell.indexOf("showToast('绑定失败')") >= 0)
+check('绑定/解绑成功后都重拉角色（换皮 + 换披风）', (shell.match(/loadRole\(\)/g) || []).length >= 3)
+check('绑定请求带超时，不会把按钮锁死', shell.indexOf('AbortController') >= 0 && shell.indexOf('请求超时（25 秒）') >= 0)
+check('菜单点击不会被画布拖动吃掉（inUi 守卫）', shell.indexOf('if (inUi(e.target)) return') >= 0 && shell.indexOf('function inUi') >= 0)
+check('失败原因在面板重开后仍可见（宿主 lastError）', shell.indexOf('account.lastError') >= 0)
 check('披风开关持久化用 dshmp-cape', shell.indexOf("cape: 'dshmp-cape'") >= 0)
 check('localStorage 统一用 dshmp- 前缀', (src.match(/'dshmp-/g) || []).length >= 5)
 check('不残留 DWS 的 storage 前缀 dshw-', src.indexOf("'dshw") < 0)
@@ -132,6 +136,7 @@ check('有自检钩子 __dshPetState', shell.indexOf('window.__dshPetState') >= 
     'fetch', 'setTimeout', 'setInterval', 'clearInterval', 'clearTimeout', 'requestAnimationFrame', 'cancelAnimationFrame',
     'parseInt', 'parseFloat', 'isFinite', 'isNaN', 'String', 'Number', 'Boolean', 'Array', 'Object', 'Math', 'Date',
     'JSON', 'Map', 'Set', 'Promise', 'Image', 'ImageData', 'MutationObserver', 'KeyboardEvent', 'localStorage',
+    'AbortController', 'Uint8ClampedArray', 'Uint8Array', 'Float32Array',
     'atob', 'btoa', 'encodeURIComponent', 'decodeURIComponent', 'console', 'Error', 'RegExp', 'Function',
   ])
   // 函数表达式的形参（resolve / reject 这类回调参数）也算已定义

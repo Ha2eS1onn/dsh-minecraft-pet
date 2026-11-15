@@ -586,6 +586,9 @@ const core = createCore({
   // 非法用户名在解析阶段就被挡住，不会出网
   const badBind = await call('/pet/account.json', loopback, { method: 'POST', body: { account: '名字里有中文' } })
   check('POST 非法账号 → ok:false 且带原因', badBind.statusCode === 200 && /"ok":false/.test(badBind.body) && /用户名/.test(badBind.body), badBind.body.slice(0, 120))
+  const afterBad = await call('/pet/account.json', loopback)
+  check('失败原因留在 lastError 里（面板重开仍可见）', /"lastError":"[^"]+用户名/.test(afterBad.body), afterBad.body.slice(0, 160))
+  check('失败不留假绑定状态', /"bound":false/.test(afterBad.body))
   const put = await call('/pet/account.json', loopback, { method: 'PUT' })
   check('PUT /pet/account.json → 405', put.statusCode === 405)
   const crossBind = await call('/pet/account.json', { host: '127.0.0.1:5173', 'sec-fetch-site': 'cross-site' }, { method: 'POST', body: { account: 'Notch' } })

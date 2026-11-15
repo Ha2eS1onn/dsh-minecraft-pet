@@ -2312,6 +2312,7 @@ return {
   var heartTex = null
   var account = null // /pet/account.json 的快照
   var accountBusy = false
+  var lastAcctMsg = '' // 面板上最后一条文案（含失败原因），探针里也读得到
   var frameTimer = 0
   var frameRaf = false
   var pollTimer = 0
@@ -2404,7 +2405,9 @@ return {
     '.dshmp-root:hover .dshmp-btn{opacity:1}' +
     '.dshmp-menu{position:absolute;right:0;bottom:26px;width:190px;padding:6px;border-radius:12px;' +
     'background:rgba(22,22,26,.94);border:1px solid rgba(255,255,255,.12);' +
-    'box-shadow:0 10px 26px rgba(0,0,0,.42);display:none}' +
+    'box-shadow:0 10px 26px rgba(0,0,0,.42);display:none;' +
+    // 账号面板展开后菜单会变高，别顶出画布上沿
+    'max-height:calc(100% - 34px);overflow-y:auto;overscroll-behavior:contain}' +
     '.dshmp-menu.on{display:block}' +
     '.dshmp-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 7px;' +
     'border-radius:8px;cursor:pointer}' +
@@ -2430,7 +2433,8 @@ return {
     'border:1px solid rgba(120,190,255,.4);background:rgba(90,170,255,.22);color:#cfe6ff}' +
     '.dshmp-go.ghost{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.16);color:#cfcfd6}' +
     '.dshmp-go[disabled]{opacity:.5;cursor:default}' +
-    '.dshmp-acct-msg{margin-top:5px;font-size:11px;line-height:1.4;color:#9cc9ff;word-break:break-all}'
+    '.dshmp-acct-msg{margin-top:5px;font-size:11px;line-height:1.4;color:#9cc9ff;word-break:break-all}' +
+    '.dshmp-acct-msg.bad{color:#ff9d9d}'
 
   function injectCss() {
     if (document.getElementById('dshmp-style')) return
@@ -2668,9 +2672,13 @@ return {
 
   // ---------------------------------------------------------------- 正版账号 / 披风（M5）
 
-  function acctMsg(text) {
+  function acctMsg(text, bad) {
+    lastAcctMsg = String(text || '')
     var el = menuEl && menuEl.querySelector('[data-acct-msg]')
-    if (el) el.textContent = text || ''
+    if (el) {
+      el.textContent = lastAcctMsg
+      el.className = 'dshmp-acct-msg' + (bad ? ' bad' : '')
+    }
   }
 
   function acctBusy(busy, text) {
@@ -2688,6 +2696,8 @@ return {
     if (nameEl) nameEl.textContent = account && account.bound ? account.name : '未绑定'
     var capeEl = menuEl.querySelector('[data-cape]')
     if (capeEl) capeEl.textContent = !(account && account.hasCape) ? '无' : opts.cape ? '开' : '关'
+    // 宿主记着上一次绑定的失败原因：面板重开后仍然看得到（比只闪一下的提示可靠）
+    if (!lastAcctMsg && account && account.lastError) acctMsg(String(account.lastError), true)
   }
 
   function loadAccount() {
@@ -2702,20 +2712,54 @@ return {
       })
   }
 
+  /** 带超时的 fetch：官方接口在大陆网络下可能长时间挂着，不能让它把按钮锁死。 */
+  function fetchWithTimeout(url, init, ms) {
+    var ctrl = null
+    try {
+      ctrl = new AbortController()
+    } catch (err) {}
+    var timer = 0
+    if (ctrl) {
+      init.signal = ctrl.signal
+      timer = setTimeout(function () {
+        try {
+          ctrl.abort()
+        } catch (err) {}
+      }, ms || 25000)
+    }
+    return fetch(url, init).then(
+      function (r) {
+        if (timer) clearTimeout(timer)
+        return r
+      },
+      function (err) {
+        if (timer) clearTimeout(timer)
+        if (err && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+          throw new Error('请求超时（25 秒），请检查网络后重试')
+        }
+        throw err
+      }
+    )
+  }
+
   /**
    * 绑定：只发一次请求（plan.md §7.2「不轮询」）。宿主侧失败不写盘，
    * 所以这里失败时除了提示什么都不用回滚。
+   * 失败必须**看得见**：按钮旁的文案 + toast + console.warn 三条一起给。
    */
   function bindAccountNow() {
-    if (accountBusy) return
+    if (accountBusy) {
+      acctMsg('上一次请求还没结束，请稍候', true)
+      return
+    }
     var input = menuEl.querySelector('[data-acct-input]')
     var value = String((input && input.value) || '').trim()
     if (!value) {
-      acctMsg('请输入 Java 版用户名或 UUID')
+      acctMsg('请输入 Java 版用户名或 UUID', true)
       return
     }
     acctBusy(true, '正在向官方服务拉取…')
-    fetch(API.account, {
+    fetchWithTimeout(API.account, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -2726,19 +2770,30 @@ return {
       })
       .then(function (d) {
         if (!d || !d.ok) {
-          acctMsg((d && d.error) || '绑定失败')
-          return null
+          var why = (d && d.error) || '绑定失败（宿主没有给出原因）'
+          acctMsg(why, true)
+          showToast('绑定失败')
+          try {
+            console.warn('[dsh-minecraft-pet] 绑定失败:', why, d)
+          } catch (err) {}
+          return
         }
         account = d
         opts.cape = true
         set(LS.cape, '1')
         applyOpts()
-        acctMsg(d.capeError ? '已绑定 ' + d.name + '，披风没拉到：' + d.capeError : '已绑定 ' + d.name)
+        acctMsg(d.capeError ? '已绑定 ' + d.name + '，披风没拉到：' + d.capeError : '已绑定 ' + d.name, !!d.capeError)
         showToast('已绑定 ' + d.name)
-        return loadRole()
+        // 立刻解锁按钮，再重建角色：换皮/换披风失败不该让面板卡在「进行中」
+        loadRole()
       })
       .catch(function (err) {
-        acctMsg('请求失败：' + String((err && err.message) || err))
+        var why = String((err && err.message) || err)
+        acctMsg('请求失败：' + why, true)
+        showToast('绑定失败：' + why.slice(0, 24))
+        try {
+          console.warn('[dsh-minecraft-pet] 绑定请求失败:', err)
+        } catch (e2) {}
       })
       .then(function () {
         acctBusy(false)
@@ -2746,9 +2801,12 @@ return {
   }
 
   function unbindAccountNow() {
-    if (accountBusy) return
+    if (accountBusy) {
+      acctMsg('上一次请求还没结束，请稍候', true)
+      return
+    }
     acctBusy(true, '正在解绑…')
-    fetch(API.account, { method: 'DELETE', credentials: 'same-origin' })
+    fetchWithTimeout(API.account, { method: 'DELETE', credentials: 'same-origin' })
       .then(function (r) {
         return r.json()
       })
@@ -2756,10 +2814,12 @@ return {
         account = d && d.ok ? d : null
         acctMsg('已解绑，皮肤回到本地版本')
         renderAccount()
-        return loadRole()
+        loadRole()
       })
       .catch(function (err) {
-        acctMsg('请求失败：' + String((err && err.message) || err))
+        var why = String((err && err.message) || err)
+        acctMsg('解绑失败：' + why, true)
+        showToast('解绑失败')
       })
       .then(function () {
         acctBusy(false)
@@ -3040,6 +3100,15 @@ return {
     menuEl.addEventListener('pointerdown', function (e) {
       e.stopPropagation()
     })
+    // 换账号时直接覆盖旧名字，不用手动全选
+    var acctInput = menuEl.querySelector('[data-acct-input]')
+    if (acctInput) {
+      acctInput.addEventListener('focus', function () {
+        try {
+          acctInput.select()
+        } catch (err) {}
+      })
+    }
     menuEl.addEventListener('click', function (e) {
       // 账号面板里的两个按钮先处理（它们没有 data-row，会落到下面的分支之外）
       if (e.target.hasAttribute && e.target.hasAttribute('data-acct-bind')) {
@@ -3082,6 +3151,10 @@ return {
       } else if (k === 'account') {
         var panel = menuEl.querySelector('[data-acct-panel]')
         if (panel) panel.className = 'dshmp-acct' + (panel.className.indexOf('on') >= 0 ? '' : ' on')
+        // 每次展开都问一次宿主：既能刷新绑定状态，也能带出上一次绑定的失败原因
+        lastAcctMsg = ''
+        acctMsg('')
+        loadAccount()
         return
       } else if (k === 'reset') {
         opts.x = -1
@@ -3104,8 +3177,21 @@ return {
     })
   }
 
+  /** 事件是否落在挂件自己的 UI 上（菜单 / 菜单按钮 / 穿透恢复点）。 */
+  function inUi(target) {
+    if (!target) return false
+    if (menuEl && menuEl.contains(target)) return true
+    if (btnEl && (btnEl === target || btnEl.contains(target))) return true
+    if (resumeBtn && (resumeBtn === target || resumeBtn.contains(target))) return true
+    return false
+  }
+
   function onDown(e) {
     if (e.button !== 0) return
+    // 菜单在画布上层，但本监听是**捕获阶段**注册在 root 上的，会先于菜单自己的 handler 执行；
+    // 一旦按下面的像素命中逻辑命中，preventDefault() 会连带取消 click —— 菜单里的按钮
+    // 就变成「点了没反应」，而且灵不灵取决于按钮底下刚好压着腿还是两腿间的缝隙。
+    if (inUi(e.target)) return
     var h = hitFrame(e.clientX, e.clientY)
     if (!h || !h.hit) return // 透明区不拦，点击照常落到页面
     e.preventDefault()
@@ -3212,6 +3298,8 @@ return {
         cape: !!eng.capeTex,
         capeTexture: eng.capeTex ? eng.capeTex.width + 'x' + eng.capeTex.height : '',
         account: account && account.bound ? account.name : '',
+        accountBusy: accountBusy,
+        accountMsg: lastAcctMsg,
         eyelid: eng.anim.eyelid,
         presses: eng.anim.counter,
         deco: opts.deco,
