@@ -28,6 +28,10 @@ const MODULES = [
   { file: 'quat.js', varName: 'QUAT' },
   { file: 'skin-render.js', varName: 'SKIN_RENDER' },
   { file: 'skin-model.js', varName: 'SKIN_MODEL' },
+  { file: 'geo-model.js', varName: 'GEO_MODEL' },
+  { file: 'spring.js', varName: 'SPRING' },
+  { file: 'type-letters.js', varName: 'TYPE_LETTERS' },
+  { file: 'letters.js', varName: 'LETTERS' },
   { file: 'gestures.js', varName: 'GESTURES' },
   { file: 'pet-state.js', varName: 'PET_STATE' },
   { file: 'pet-anim.js', varName: 'PET_ANIM' },
@@ -101,13 +105,22 @@ function buildBundle() {
   parts.push('  quat: QUAT,')
   parts.push('  render: SKIN_RENDER,')
   parts.push('  model: SKIN_MODEL,')
+  parts.push('  geo: GEO_MODEL,')
+  parts.push('  spring: SPRING,')
+  parts.push('  typeLetters: TYPE_LETTERS,')
+  parts.push('  letters: LETTERS,')
   parts.push('  gestures: GESTURES,')
   parts.push('  state: PET_STATE,')
   parts.push('  anim: PET_ANIM,')
   parts.push('  effects: EFFECTS,')
   parts.push('  decorations: DECORATIONS,')
   parts.push('  status: STATUS_EFFECTS,')
-  parts.push(`  assets: { note: ${JSON.stringify(dataUrl('note.png'))}, heart: ${JSON.stringify(dataUrl('heart.png'))} },`)
+  // 贴图与小模型都内嵌：少两条资源路由，也避开「资源目录被清理」
+  parts.push(
+    `  assets: { note: ${JSON.stringify(dataUrl('note.png'))}, heart: ${JSON.stringify(dataUrl('heart.png'))},` +
+      ` duck: ${JSON.stringify(dataUrl('decoration-duck.png'))},` +
+      ` duckGeo: ${JSON.stringify(fs.readFileSync(path.join(ASSETS, 'decoration-duck.geo.json'), 'utf8'))} },`,
+  )
   parts.push('}')
   parts.push('})()')
   return parts.join('\n')

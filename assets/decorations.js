@@ -8,6 +8,8 @@
 //
 // 每个 cube 的局部坐标与尺寸都是常量，按 kind 缓存一次；每帧只做 mount × translate。
 
+import { geoParts } from './geo-model.js'
+
 // 调色板，取自 render_decorations.rs:5 的 palette。
 const WHITE = [244, 240, 241]
 const PINK = [246, 164, 184]
@@ -16,7 +18,8 @@ const BLUSH = [244, 164, 186]
 const CREAM = [250, 247, 237]
 const RED = [224, 42, 55]
 
-export const DECORATIONS = ['none', 'rabbit', 'cat', 'heart', 'lollipop']
+/** duck 是 P2 的 Bedrock `.geo.json` 模型（见 geo-model.js），其余四种是纯色 cube。 */
+export const DECORATIONS = ['none', 'rabbit', 'cat', 'heart', 'lollipop', 'duck']
 
 const TAU = Math.PI * 2
 
@@ -103,12 +106,18 @@ function localCubes(kind, heartTex) {
 /**
  * 生成装饰的 part 列表。
  * @param {object} headPart buildParts 里 key === 'head' 且 inflate === 0 的那个
- * @param {string} kind 'rabbit' | 'cat' | 'heart' | 'lollipop' | 'none'
- * @param {{heart?: object}} [assets] 爱心需要 assets/heart.png 的纹理
+ * @param {string} kind 'rabbit' | 'cat' | 'heart' | 'lollipop' | 'duck' | 'none'
+ * @param {{heart?: object, geo?: {model: object, texture: object}}} [assets]
+ *   爱心需要 heart.png 纹理；duck 需要已解析的 geo 模型 + 贴图
  */
 export function decorationParts(headPart, kind, assets = {}) {
   if (!kind || kind === 'none') return []
   if (!headPart) return []
+  // Bedrock geo 模型：走 geoParts（自带底部对齐与贴图），不复用下面的纯色 cube 路径
+  if (kind === 'duck') {
+    if (!assets.geo || !assets.geo.model) return []
+    return geoParts(headPart, assets.geo.model, { texture: assets.geo.texture })
+  }
   const cubes = localCubes(kind, assets.heart)
   const mount = headMount(headPart)
   return cubes.map(([center, size, color]) => ({

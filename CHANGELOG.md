@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.0 — 2026-11-15
+
+**P2 三项全部完成**：敲字浮现字、阻尼弹簧物理模拟、Bedrock `.geo.json` 装饰模型。纯前端，宿主 `lib/` 一行未改，无需重启客户端（Ctrl+F5 即可）。
+
+### 新增
+
+- **P2-c 敲字浮现字**
+  - `assets/type-letters.js`：`keyLabelFromEvent`（中文输入法组合期 / `keyCode 229` / `Unidentified` 一律跳过）、6 行 74 键的物理键位表（`event.code` 索引，归一化到 19.6×7.8 键盘盒）、`buildGlyphs` + `canvasRasterizer`（离屏 canvas `bold 20px` → alpha ≥128 阈值化，24×24 白字模，首次约 5~10 ms 后缓存）
+  - `assets/letters.js`：`LetterField`，0.8 s 生命、上限 64、糖果色 9 选 1、`alpha = 1 - t²`、上飘 10.8 单位、两遍绘制（暗色阴影 + 正色）。**多字符键名逐字符排版**（照 MDP `label()` 的墨迹宽度步进），所以 `Space` / `Enter` / `F12` 也能显示
+  - 挂件：`keydown` → `pushLetter`，只在坐姿（`pose.sit > 0.4`）显示；字画在对应按键的键盘顶面坐标，顺序为 人物 → 状态粒子 → **浮现字** → 音符；有字时帧需求升到 60 fps
+- **P2-a 物理模拟**
+  - `assets/spring.js`：固定步长 1/60 + 累加器（单帧最多 8 子步）、可瞬间 `reset()`、收敛后吸附、`settled` 供帧需求分级。**MDP 里没有物理**，这块是照 `plan.md` §6.6 三条纪律新写的
+  - `pet-anim.js`：`done` 落地一次冲量 → 压缩回弹（k=140 ζ=0.5）、头部跟随过两层阻尼弹簧（k=160 ζ=0.85）、呼吸相位缓慢漂移；状态切换时全部归零，不带残留速度；`physicsBusy` 让回弹期间保持 60 fps
+  - `DEFAULT_ANIM.physics` 开关；关掉后动效与 P1 逐像素一致（`render-m0` 基线仍 `25928 px / c2c43ab4`）
+- **P2-b Bedrock `.geo.json` 装饰**
+  - `assets/geo-model.js`：`parseGeo` / `pivotRotation` / `checkTextureSize` / `geoParts`。父骨骼可后定义（递归 + 缓存）、pivot 旋转 `T(p)·Rz·Ry·Rx·T(-p)`、Bedrock 前后轴 `rotY(π)` 双套转换、按摆姿后几何最低点对齐头顶、贴图尺寸与 `description.texture_*` 校验
+  - `assets/decoration-duck.geo.json` + `decoration-duck.png`：自造的小鸭模型与贴图（无 Mojang 素材），菜单「装饰」多一档「小鸭」；模型或贴图加载失败只丢该装饰，不白屏
+- **验具**：`tools/test-geo.mjs`（22 项）、`tools/test-letters.mjs`（49 项）、`tools/make-geo-duck.mjs`（生成小鸭素材）；`test-anim` 补物理断言，`test-widget` **53 → 76 项**（含四个新模块真的在产物里、P2 接线、弹簧收敛、内嵌 geo 可解析）
+- **对照图**：`prototype/p2-duck.png`（头顶小鸭）、`prototype/p2-letters.png`（坐姿 A / F / K / SPACE 四枚浮现字，2× 放大）
+
+### 修复（本轮自测抓到的）
+
+- **`drawSprite` 的 tint 是 0..1 乘数**，第一版糖果色与阴影写成了 0..255，`Math.min(255, ...)` 后全部饱和成白色 —— 字和阴影都是白的。统一按 `rgb/255` 换算
+- **多字符键名永远画不出来**：`Space` / `Enter` 这类 label 在 94 个单字模里查不到整串。改成逐字符横排（与 MDP 一致）
+- **静止首帧白造 94 个字模**：`draw` 里改成只在 `letters.active` 时调 `glyphs()`
+- 演示字模改为居中留白（铺满 24 格会让逐字步进小于字宽、字母互相压住）；演示间隔拉开到 0.14 s 并 2× 放大
+
+### 已知限制
+
+- **P2 只在 node 自测与静态对照图里验过，真机人眼验收未做**（挂件按 mtime 热读，Ctrl+F5 即可看）
+- 浮现字是**页面级**键盘：只响应 DSH 页面内的 `keydown`，切到别的应用不显示；中文输入法只出键名不出汉字（与 MDP 一致）
+- `.geo.json` 只支持 box UV（`cube.uv` 为 `[u,v]`）；per-face UV 对象形式直接报错。目前只带了一个自造小鸭模型
+- 24 px 的字宽略大于 60% 键盘的键距，快速连打时相邻字会部分重叠 —— 靠 0.8 s 内的上升时间与糖果色区分，与 MDP 行为一致
+
 ## 0.3.0 — 2026-11-15
 
 **M5 正版账号披风**：输入 Java 版用户名或 UUID，拉取该账号的皮肤 + 模型类型 + 披风，全在本机。
@@ -31,7 +65,7 @@
 ### 已知限制
 
 - 披风是从正面视角渲染的：项目没有模型旋转，相机永远在 +Z，因此披风只在腰侧露出一条（站姿约 248 px、坐姿约 685 px），图案区落在朝向相机的那一面（`uv = [0,0]`，与 MDP 的 `-11` 不同，理由见 `plan.md` §7.5）
-- DSH 客户端菜单里的绑定面板还没人点过（宿主改动需重启客户端）；底层链路已用 `jeb_` / `Dinnerbone` / `Grumm` 三个真实账号验过：皮肤与披风均能拉取、落盘、渲染，解绑能逐字节还原原皮肤
+- DSH 客户端菜单里的绑定面板已于 2026-11-15 14:47 由用户真机验收通过：绑定、换另一个正版账号、披风显示、解绑全部正常；底层链路另用 `jeb_` / `Dinnerbone` / `Grumm` 三个真实账号验过拉取、落盘、渲染与逐字节还原
 
 ## 0.2.0 — 2026-11-15
 

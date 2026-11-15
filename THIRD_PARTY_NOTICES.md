@@ -16,9 +16,15 @@
 | `native/src/render_effects.rs` | 音符粒子的数据结构与渲染曲线 | `assets/effects.js` |
 | `native/src/render_gestures.rs` | 待机手势的调度器与三条动作 | `assets/gestures.js` |
 | `native/src/render.rs`（状态与姿态表） | 六态姿态、呼吸/跟随/打字的曲线参数 | `assets/pet-state.js`、`assets/pet-anim.js` |
+| `native/src/decoration_models.rs` | Bedrock `.geo.json` 骨骼层级、pivot 旋转、`rotY(π)` 前后轴转换、底部对齐 | `assets/geo-model.js` |
+| `native/src/render_effects.rs`（`key_label` / `label` / `letter` / `glyphs`）、`native/src/render.rs`（`key_position`） | 敲字浮现字的键名映射、6 行键位表、24×24 字模逐字符排版、0.8s 运动曲线 | `assets/type-letters.js`、`assets/letters.js` |
 
 移植改动：Rust → JavaScript（Canvas 2D）；移除 Win32 窗口/钩子/托盘层、披风库、
-系统级音频采集与音效；音符改为「宿主报告有音频才生成」；新增 DSH 会话六态 → 姿态映射。
+系统级音频采集与音效；音符改为「宿主报告有音频才生成」；新增 DSH 会话六态 → 姿态映射；
+字模改用浏览器离屏 canvas 光栅化替代 GDI / AppKit；`.geo.json` 只实现 box UV 子集。
+
+`assets/spring.js`（P2-a 阻尼弹簧）**为本项目自写**：MDP 全项目没有物理模拟，
+这块按 `docs/plan.md` §6.6 的三条纪律新写，非移植。
 
 `lib/audio-meter.ps1` 借鉴 **dsh-whale-states** <https://github.com/MeteorNOX/dsh-whale-states>
 （MIT，© MeteorNOX，commit `f7d6516`）的 WASAPI 峰值轮询做法，本项目重写为独立脚本。
@@ -42,10 +48,12 @@ MIT 授权，见 `LICENSE`。旧版派生自 dsh-whale-states 的宿主与挂件
 
 - `assets/default-skin.png`、`prototype/da-skin.png`：用户自备的 64×64 皮肤，仅用于本地渲染与自检，
   不随 npm 包分发，本项目不主张权利。
+- `assets/decoration-duck.geo.json` + `decoration-duck.png`：由 `tools/make-geo-duck.mjs` 自造的
+  Bedrock 模型与 64×32 贴图，本项目原创，MIT 覆盖；不含任何 Mojang 素材。
 - `icon.png`：由 `tools/make-icon.mjs` 用本项目渲染器从皮肤实时生成。
 - 角色皮肤与披风：由用户自行提供；或用户主动绑定账号后，通过 Mojang 官方服务
   （`api.mojang.com` / `sessionserver.mojang.com` / `textures.minecraft.net`）拉取该账号
-  自身的数据，仅在本机缓存用于渲染，不再分发（披风为 M5 计划，当前版本 `hasCape` 恒 `false`）。
+  自身的数据，仅在本机缓存用于渲染，不再分发（M5 已实现绑定，0.3.0 起 `hasCape` 取真值）。
 - **披风贴图库（90+ 张）不包含在本插件内。**
 
 ## 商标

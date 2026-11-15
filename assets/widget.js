@@ -999,6 +999,625 @@ function staticParts(skin, opts) {
 
 return { OVERLAY_UV, defaultPose, buildParts, staticParts, baseBody, torsoSpace, bodySpace }
 })()
+var GEO_MODEL = (function () {
+// Bedrock `.geo.json` 装饰模型（P2-b，plan.md §6.7）。
+// Ported from Minecraft-Desktop-Pet (MIT) — native/src/decoration_models.rs:1-46
+//
+// 只做一件事：把 geckolib/Bedrock 的骨骼盒子模型转成 drawBox 能吃的 part 列表。
+// 五个容易错的地方（尽量照抄，别自己推）：
+//   ① 骨骼用 `parent` 串起来，父节点可能**后定义** → 递归求 + 缓存（MDP 单趟查表其实有洞）
+//   ② pivot 旋转是 T(pivot)·R·T(-pivot)，旋转顺序 ZYX（Rz·Ry·Rx），单位是度
+//   ③ Bedrock 前后轴与渲染空间相反 → `conversion = rotY(π)`，**每个 cube 前后各套一次**
+//   ④ 底部对齐用「摆好姿势后的几何最低点」，不是 origin 的 y
+//   ⑤ 贴图宽度必须等于 description.texture_width（高度同理）
+//
+// 只支持 box UV（`cube.uv` 是 [u,v]）；per-face UV 的对象形式直接报错，
+// 因为我们的 drawBox 只有一套展开公式。
+
+var { translate, scale, multiply, identity, transformPoint } = SKIN_RENDER
+var Q = QUAT
+
+const DEG = Math.PI / 180
+/** Bedrock 的 +Z 与渲染空间的 +Z 相反（decoration_models.rs:15）。 */
+const CONVERSION = Q.toMatrix(Q.rotY(Math.PI))
+
+function triple(v, dflt = [0, 0, 0]) {
+  if (!Array.isArray(v)) return dflt.slice()
+  return [Number(v[0]) || 0, Number(v[1]) || 0, Number(v[2]) || 0]
+}
+
+/**
+ * 节点自身的 pivot 旋转：T(pivot) · Rz·Ry·Rx · T(-pivot)。
+ * 骨骼与 cube 都可能带 pivot/rotation，同一套公式。
+ */
+function pivotRotation(node) {
+  const p = triple(node && node.pivot)
+  const r = triple(node && node.rotation).map((d) => d * DEG)
+  const rot = Q.multiply(Q.multiply(Q.rotZ(r[2]), Q.rotY(r[1])), Q.rotX(r[0]))
+  return multiply(multiply(translate(p[0], p[1], p[2]), Q.toMatrix(rot)), translate(-p[0], -p[1], -p[2]))
+}
+
+function asObject(input) {
+  if (typeof input === 'string') return JSON.parse(input)
+  if (input && typeof input === 'object') return input
+  throw new Error('geo 模型必须是 JSON 文本或对象')
+}
+
+/**
+ * 解析模型。
+ * @param {string|object} input `.geo.json` 内容
+ * @returns {{identifier:string, textureWidth:number, textureHeight:number,
+ *            parts:{size:number[],uv:number[],transform:number[],mirror:boolean}[],
+ *            bottom:number}}
+ */
+function parseGeo(input) {
+  const data = asObject(input)
+  const list = data['minecraft:geometry'] || data.geometry
+  const geo = Array.isArray(list) ? list[0] : null
+  if (!geo) throw new Error('geo 模型缺少 minecraft:geometry[0]')
+  const desc = geo.description || {}
+  const textureWidth = Number(desc.texture_width) || 0
+  const textureHeight = Number(desc.texture_height) || 0
+  const bones = Array.isArray(geo.bones) ? geo.bones : []
+
+  const byName = new Map()
+  for (const b of bones) if (b && typeof b.name === 'string') byName.set(b.name, b)
+  const cache = new Map()
+  function boneTransform(bone, depth = 0) {
+    if (cache.has(bone.name)) return cache.get(bone.name)
+    const parent = bone.parent ? byName.get(bone.parent) : null
+    // 父节点后定义也能拿到；同时挡住 parent 成环
+    const base = parent && depth < 32 ? boneTransform(parent, depth + 1) : identity()
+    const m = multiply(base, pivotRotation(bone))
+    cache.set(bone.name, m)
+    return m
+  }
+
+  const parts = []
+  for (const bone of bones) {
+    if (!bone) continue
+    const boneM = boneTransform(bone)
+    const cubes = Array.isArray(bone.cubes) ? bone.cubes : []
+    for (const cube of cubes) {
+      if (!cube) continue
+      if (!Array.isArray(cube.uv)) {
+        throw new Error('geo 模型只支持 box UV（cube.uv 必须是 [u, v]）')
+      }
+      const size = triple(cube.size)
+      const origin = triple(cube.origin)
+      const center = [origin[0] + size[0] / 2, origin[1] + size[1] / 2, origin[2] + size[2] / 2]
+      const m = multiply(
+        multiply(
+          multiply(multiply(CONVERSION, boneM), pivotRotation(cube)),
+          translate(center[0], center[1], center[2]),
+        ),
+        CONVERSION,
+      )
+      parts.push({
+        size,
+        uv: [Number(cube.uv[0]) || 0, Number(cube.uv[1]) || 0],
+        transform: m,
+        mirror: cube.mirror === true,
+      })
+    }
+  }
+
+  // 摆好姿势后的最低点：8 个角都要看（plan §6.7 第 5 条）
+  let bottom = Infinity
+  for (const p of parts) {
+    for (const x of [-1, 1]) {
+      for (const y of [-1, 1]) {
+        for (const z of [-1, 1]) {
+          const v = transformPoint(p.transform, [
+            (p.size[0] * x) / 2,
+            (p.size[1] * y) / 2,
+            (p.size[2] * z) / 2,
+          ])
+          if (v[1] < bottom) bottom = v[1]
+        }
+      }
+    }
+  }
+  if (!parts.length) bottom = 0
+
+  return {
+    identifier: String(desc.identifier || ''),
+    textureWidth,
+    textureHeight,
+    parts,
+    bottom,
+  }
+}
+
+/** 校验贴图尺寸与模型声明一致（MDP 是 assert_eq，这里给可读的错）。 */
+function checkTextureSize(model, tex) {
+  if (!tex) throw new Error('缺少装饰贴图')
+  if (model.textureWidth && tex.width !== model.textureWidth) {
+    throw new Error(`装饰贴图宽度 ${tex.width} 与模型声明 ${model.textureWidth} 不一致`)
+  }
+  if (model.textureHeight && tex.height !== model.textureHeight) {
+    throw new Error(`装饰贴图高度 ${tex.height} 与模型声明 ${model.textureHeight} 不一致`)
+  }
+  return true
+}
+
+/** 头部挂载矩阵：头部完整矩阵 × 等比缩放(head.size.y / 8)（同 P1 装饰）。 */
+function headMount(headPart) {
+  const s = headPart.size[1] / 8
+  const m = headPart.transform
+  return [m[0] * s, m[1] * s, m[2] * s, m[3], m[4] * s, m[5] * s, m[6] * s, m[7], m[8] * s, m[9] * s, m[10] * s, m[11], m[12], m[13], m[14], m[15]]
+}
+
+/**
+ * 把模型挂到头顶。
+ * @param {object} headPart buildParts 里 key === 'head' 且 inflate === 0 的部件
+ * @param {object} model parseGeo 的结果
+ * @param {{texture:object, scale?:number, lift?:number}} opts
+ *   scale 0.36 是 MDP 对美西螈的比例；lift 4.55 让底部正好压在头的外层皮肤（Y=4.5）之上
+ */
+function geoParts(headPart, model, { texture, scale: k = 0.36, lift = 4.55 } = {}) {
+  if (!headPart || !model || !model.parts.length) return []
+  if (!texture) throw new Error('geo 装饰需要贴图')
+  // 底部对齐：elevation 让模型最低点落在 lift 上
+  const elevation = lift - model.bottom * k
+  const mount = multiply(
+    headMount(headPart),
+    multiply(translate(0, elevation, 0), scale(k, k, k)),
+  )
+  return model.parts.map((p) => ({
+    key: 'decoration',
+    size: p.size,
+    uv: p.uv,
+    transform: multiply(mount, p.transform),
+    inflate: 0,
+    mirror: p.mirror,
+    texture,
+  }))
+}
+
+return { pivotRotation, parseGeo, checkTextureSize, geoParts }
+})()
+var SPRING = (function () {
+// 阻尼弹簧（P2-a 物理模拟，plan.md §6.6）。
+//
+// MDP 里没有物理（全项目 spring/damping/velocity 零命中），这块是新写的。
+// 三条硬纪律（plan §6.6）：
+//   ① 固定步长 1/60，用累加器跑 N 次，**不按实际帧间隔积分** —— 否则 30fps 与 60fps 行为不同
+//   ② 支持瞬间重置：状态切换时归零，避免「从 done 回 idle 后带着残留速度歪着」
+//   ③ 不参与状态判定：物理只做次级运动，状态仍由事件驱动
+//
+// 用法：
+//   const s = new Spring({ k: 140, zeta: 0.5 })
+//   s.impulse(9)          // 给一次初速度（落地/被推）
+//   s.step(0, dt)         // 每帧推进，返回当前值
+//   s.settled             // 帧需求分级用：还在动就要 60fps
+
+const SPRING_DT = 1 / 60
+/** 单帧最多补算几步：卡顿后不要一次补 100 步把主线程堵住。 */
+const MAX_SUBSTEPS = 8
+
+class Spring {
+  /**
+   * @param {{k?:number, zeta?:number, value?:number, eps?:number}} [opts]
+   *   k 刚度（越大越快）、zeta 阻尼比（1 = 临界阻尼不振荡，0.5~0.8 有回弹）
+   */
+  constructor({ k = 120, zeta = 1, value = 0, eps = 1e-3 } = {}) {
+    this.k = k
+    this.zeta = zeta
+    this.c = 2 * Math.sqrt(k) * zeta
+    this.value = value
+    this.velocity = 0
+    this.target = value
+    this.eps = eps
+    this.acc = 0
+  }
+
+  /** 直接给速度（模型单位/秒）。落地回弹就是一次 impulse。 */
+  impulse(v) {
+    this.velocity += v
+    return this
+  }
+
+  /** 瞬间归零（状态切换时调；plan §6.6 纪律 ②）。 */
+  reset(value = 0) {
+    this.value = value
+    this.target = value
+    this.velocity = 0
+    this.acc = 0
+    return this
+  }
+
+  get settled() {
+    return Math.abs(this.value - this.target) < this.eps && Math.abs(this.velocity) < this.eps
+  }
+
+  /**
+   * 推进一帧。
+   * @param {number} target 目标值
+   * @param {number} dt 真实帧间隔（秒）；内部按固定步长积分
+   * @returns {number} 当前值
+   */
+  step(target, dt) {
+    this.target = target
+    const d = Math.max(0, Math.min(0.25, dt || 0))
+    this.acc += d
+    let n = 0
+    while (this.acc >= SPRING_DT && n < MAX_SUBSTEPS) {
+      const a = -this.k * (this.value - target) - this.c * this.velocity
+      this.velocity += a * SPRING_DT
+      this.value += this.velocity * SPRING_DT
+      this.acc -= SPRING_DT
+      n++
+    }
+    if (n === MAX_SUBSTEPS) this.acc = 0
+    // 收敛后吸附：不吸附的话 settled 永远为假，帧需求会一直卡在 60fps
+    if (Math.abs(this.value - target) < this.eps && Math.abs(this.velocity) < this.eps) {
+      this.value = target
+      this.velocity = 0
+    }
+    return this.value
+  }
+}
+
+return { SPRING_DT, Spring }
+})()
+var TYPE_LETTERS = (function () {
+// 敲字浮现字的第一半：键名 + 键位表（plan.md §17）。
+// Ported from Minecraft-Desktop-Pet (MIT) — native/src/render_effects.rs:17-40, 314-325
+//                                              native/src/render.rs:318 key_position()
+//
+// 字模**不在这里造**：`buildGlyphs(rasterize)` 收一个光栅化函数（浏览器传离屏 canvas，
+// 自测传假的），这样模块在 node 里也能跑，且不需要打包任何字体文件。
+//
+// 键位表按物理键位（`event.code`）索引，与键盘印字无关——中文输入法下 code 仍然稳定。
+
+/** 键位表归一化后的横向范围（模型单位，键盘盒 19.6 宽）。 */
+const KB_HALF_W = 9.8
+/** 键盘盒深度 7.8，均分给 6 行。 */
+const KB_ROWS = 6
+const KB_DEPTH = 7.8
+
+/**
+ * 六行键位，每项是 [code, 宽度系数]。宽度系数是标准 60% 键盘的相对宽度，
+ * 每行独立归一化到 19.6 单位（鼠标键盘比真实键盘小，不值得按毫米还原）。
+ */
+const ROWS = [
+  [
+    ['Escape', 1],
+    ['F1', 1], ['F2', 1], ['F3', 1], ['F4', 1], ['F5', 1], ['F6', 1],
+    ['F7', 1], ['F8', 1], ['F9', 1], ['F10', 1], ['F11', 1], ['F12', 1],
+  ],
+  [
+    ['Backquote', 1],
+    ['Digit1', 1], ['Digit2', 1], ['Digit3', 1], ['Digit4', 1], ['Digit5', 1],
+    ['Digit6', 1], ['Digit7', 1], ['Digit8', 1], ['Digit9', 1], ['Digit0', 1],
+    ['Minus', 1], ['Equal', 1], ['Backspace', 2],
+  ],
+  [
+    ['Tab', 1.5],
+    ['KeyQ', 1], ['KeyW', 1], ['KeyE', 1], ['KeyR', 1], ['KeyT', 1],
+    ['KeyY', 1], ['KeyU', 1], ['KeyI', 1], ['KeyO', 1], ['KeyP', 1],
+    ['BracketLeft', 1], ['BracketRight', 1], ['Backslash', 1.5],
+  ],
+  [
+    ['CapsLock', 1.75],
+    ['KeyA', 1], ['KeyS', 1], ['KeyD', 1], ['KeyF', 1], ['KeyG', 1],
+    ['KeyH', 1], ['KeyJ', 1], ['KeyK', 1], ['KeyL', 1],
+    ['Semicolon', 1], ['Quote', 1], ['Enter', 2.25],
+  ],
+  [
+    ['ShiftLeft', 2.25],
+    ['KeyZ', 1], ['KeyX', 1], ['KeyC', 1], ['KeyV', 1], ['KeyB', 1], ['KeyN', 1], ['KeyM', 1],
+    ['Comma', 1], ['Period', 1], ['Slash', 1], ['ShiftRight', 2.75],
+  ],
+  [
+    ['ControlLeft', 1.25], ['MetaLeft', 1.25], ['AltLeft', 1.25],
+    ['Space', 6.25],
+    ['AltRight', 1.25], ['MetaRight', 1.25], ['ContextMenu', 1.25], ['ControlRight', 1.25],
+  ],
+]
+
+/** code → [x, z]（键盘盒局部坐标，中心为原点，y 取顶面在调用方加）。 */
+const POSITIONS = new Map()
+for (let r = 0; r < ROWS.length; r++) {
+  const row = ROWS[r]
+  let total = 0
+  for (const [, w] of row) total += w
+  let cursor = 0
+  const z = -KB_DEPTH / 2 + ((r + 0.5) * KB_DEPTH) / KB_ROWS
+  for (const [code, w] of row) {
+    const x = -KB_HALF_W + ((cursor + w / 2) / total) * KB_HALF_W * 2
+    POSITIONS.set(code, [x, z])
+    cursor += w
+  }
+}
+
+const KEY_POSITION_COUNT = POSITIONS.size
+
+/**
+ * 物理键位 → 键在键盘盒上的局部 [x, z]。拿不到映射（媒体键、输入法键）返回 null，
+ * 调用方据此决定「不显示」而不是瞎猜一个位置。
+ */
+function keyPositionFromCode(code) {
+  if (typeof code !== 'string') return null
+  const p = POSITIONS.get(code)
+  return p ? [p[0], p[1]] : null
+}
+
+/** 少数键的显示名（单字符键直接用 key 本身）。 */
+const NAMED = {
+  Enter: 'Enter',
+  Tab: 'Tab',
+  Backspace: 'Bksp',
+  Escape: 'Esc',
+  CapsLock: 'Caps',
+  Shift: 'Shift',
+  Control: 'Ctrl',
+  Alt: 'Alt',
+  Meta: 'Cmd',
+  ArrowUp: 'Up',
+  ArrowDown: 'Dn',
+  ArrowLeft: 'Lt',
+  ArrowRight: 'Rt',
+  Delete: 'Del',
+  Insert: 'Ins',
+  Home: 'Home',
+  End: 'End',
+  PageUp: 'PgUp',
+  PageDown: 'PgDn',
+}
+
+/**
+ * KeyboardEvent → 要浮出来的文字。返回 null 表示这次按键不该显示。
+ * 中文输入法组合期间 `key` 是 `Process`/`Unidentified`，一律跳过（plan.md §17.2）。
+ */
+function keyLabelFromEvent(e) {
+  if (!e) return null
+  if (e.isComposing || e.keyCode === 229) return null
+  const k = e.key
+  if (typeof k !== 'string' || !k) return null
+  if (k === 'Unidentified' || k === 'Process' || k === 'Dead') return null
+  if (k.length === 1) return k === ' ' ? 'Space' : k
+  if (/^F([1-9]|1[0-2])$/.test(k)) return k
+  return NAMED[k] || null
+}
+
+/** 字模格子的边长（像素）。MDP 是 24×24 覆盖率位图，这里沿用。 */
+const GLYPH_CELL = 24
+/** 阈值：alpha >= 该值算「墨」，据此把系统字体的抗锯齿压成像素感。 */
+const INK_THRESHOLD = 128
+
+/**
+ * 造字模表。
+ * @param {(ch: string, cell: number) => Uint8ClampedArray|null} rasterize
+ *   返回 cell×cell 的 RGBA（浏览器传 canvas 版，自测传假的）；返回 null 表示这个字符画不出来
+ * @param {string} [chars] 要造的字符集，默认可打印 ASCII
+ * @returns {Map<string, {width:number, height:number, rgba:Uint8ClampedArray}>}
+ */
+function buildGlyphs(rasterize, chars) {
+  const set = chars || defaultCharset()
+  const out = new Map()
+  for (const ch of set) {
+    let raw = null
+    try {
+      raw = rasterize(ch, GLYPH_CELL)
+    } catch (err) {
+      raw = null
+    }
+    if (!raw || raw.length < GLYPH_CELL * GLYPH_CELL * 4) continue
+    const rgba = new Uint8ClampedArray(GLYPH_CELL * GLYPH_CELL * 4)
+    let ink = 0
+    for (let i = 0; i < rgba.length; i += 4) {
+      if (raw[i + 3] >= INK_THRESHOLD) {
+        // 白色 + 阈值化 alpha：颜色留给 tint，形状留成硬边像素
+        rgba[i] = 255
+        rgba[i + 1] = 255
+        rgba[i + 2] = 255
+        rgba[i + 3] = 255
+        ink++
+      }
+    }
+    if (!ink) continue
+    out.set(ch, { width: GLYPH_CELL, height: GLYPH_CELL, rgba })
+  }
+  return out
+}
+
+/** 可打印 ASCII + 几个键名里会用到的字符。 */
+function defaultCharset() {
+  const set = []
+  for (let c = 33; c <= 126; c++) set.push(String.fromCharCode(c))
+  return set
+}
+
+/**
+ * 浏览器侧的默认光栅化器：离屏 canvas + 系统字体 + 居中 fillText。
+ * 首次造 94 个字符约 5~10 ms（plan.md §17.2），结果由调用方缓存。
+ */
+function canvasRasterizer(doc) {
+  const d = doc || (typeof document !== 'undefined' ? document : null)
+  if (!d || !d.createElement) return null
+  let canvas = null
+  let ctx = null
+  return function rasterize(ch, cell) {
+    if (!canvas) {
+      canvas = d.createElement('canvas')
+      canvas.width = cell
+      canvas.height = cell
+      ctx = canvas.getContext('2d', { willReadFrequently: true })
+      if (!ctx) return null
+    }
+    ctx.clearRect(0, 0, cell, cell)
+    ctx.fillStyle = '#fff'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    // 粗体 + 20px：MDP 用 20pt bold，这里同量级，24 格刚好装下
+    ctx.font = 'bold 20px system-ui, -apple-system, "Segoe UI", sans-serif'
+    ctx.fillText(ch, cell / 2, cell / 2 + 1)
+    const data = ctx.getImageData(0, 0, cell, cell).data
+    return new Uint8ClampedArray(data)
+  }
+}
+
+return { KEY_POSITION_COUNT, keyPositionFromCode, keyLabelFromEvent, GLYPH_CELL, buildGlyphs, defaultCharset, canvasRasterizer }
+})()
+var LETTERS = (function () {
+// 敲字浮现字的第二半：Letter 场（plan.md §17）。
+// Ported from Minecraft-Desktop-Pet (MIT) — native/src/render_effects.rs:314-340
+//
+// 一条字的一生：按键时把「键在键盘顶面的模型坐标」记下来 → 每帧投影到屏幕 →
+// 随时间向上飘 + 二次方淡出 → 画两遍（暗色阴影 + 亮色正字）。
+// 与音符的区别：音符挂在头顶、由音频驱动；浮现字挂在键盘上、由按键驱动。
+
+var { project } = SKIN_RENDER
+
+/** 一枚字活多久（秒）。 */
+const LETTER_LIFE = 0.8
+/** 同屏上限，超出丢最老的（MDP 也是 64）。 */
+const LETTER_MAX = 64
+/** 一生的上升量，模型单位（MDP `rise = 10.8`）。 */
+const LETTER_RISE = 10.8
+/** 屏幕上字的边长（像素）。MDP 是 `(24 * width/360).ceil()`，352 宽下约 24。 */
+const LETTER_SIZE = 24
+/** 糖果色 9 选 1（MDP 的 letters palette）。量纲是 0..1 乘数，drawSprite 会乘在白色字模上。 */
+const PALETTE_RGB = [
+  [255, 120, 150],
+  [255, 190, 90],
+  [140, 220, 140],
+  [120, 200, 255],
+  [190, 160, 255],
+  [255, 150, 90],
+  [120, 230, 220],
+  [250, 240, 120],
+  [255, 120, 200],
+]
+const LETTER_COLORS = PALETTE_RGB.map((c) => c.map((v) => v / 255))
+
+/** 阴影色（MDP `letter()` pass 0 的 `[70,45,70]`，同样换算成 0..1）。 */
+const SHADOW_TINT = [70 / 255, 45 / 255, 70 / 255]
+
+/**
+ * 单字模的横向步进：墨迹列跨度 + 3 格边距（MDP `label()` 的 `(right-left+3)*scale`）。
+ * 比例缓存在 tex 上，94 个字模只扫一次；没有墨的字给一个默认宽度。
+ */
+function advanceOf(tex, size) {
+  if (tex.advanceRatio == null) {
+    let left = tex.width
+    let right = -1
+    for (let y = 0; y < tex.height; y++) {
+      for (let x = 0; x < tex.width; x++) {
+        if (tex.rgba[(y * tex.width + x) * 4 + 3] >= 128) {
+          if (x < left) left = x
+          if (x > right) right = x
+        }
+      }
+    }
+    const cols = right >= left ? right - left + 4 : 11
+    tex.advanceRatio = cols / tex.width
+  }
+  return tex.advanceRatio * size
+}
+
+class LetterField {
+  constructor({ max = LETTER_MAX } = {}) {
+    this.max = max
+    /** @type {{pos:number[], label:string, start:number, color:number[]}[]} */
+    this.items = []
+    this.seq = 0
+  }
+
+  /**
+   * @param {number[]} pos 模型空间坐标（键盘顶面该键的位置）
+   * @param {string} label 要显示的文字（单字符或键名）
+   * @param {number} now 秒
+   */
+  push(pos, label, now) {
+    if (!pos || !label) return null
+    const item = {
+      pos: [pos[0], pos[1], pos[2]],
+      label: String(label).slice(0, 5),
+      start: now,
+      color: LETTER_COLORS[this.seq % LETTER_COLORS.length],
+    }
+    this.seq += 1
+    this.items.push(item)
+    // 超出上限丢最老的：连打时不能越积越多
+    while (this.items.length > this.max) this.items.shift()
+    return item
+  }
+
+  /** 清掉过期的。每帧调用一次（与 NoteField 同节奏）。 */
+  update(now) {
+    if (!this.items.length) return
+    let keep = 0
+    for (let i = 0; i < this.items.length; i++) {
+      if (now - this.items[i].start < LETTER_LIFE) this.items[keep++] = this.items[i]
+    }
+    this.items.length = keep
+  }
+
+  get active() {
+    return this.items.length > 0
+  }
+
+  get count() {
+    return this.items.length
+  }
+
+  /** 帧需求分级用：还有字在飘就别降帧。 */
+  get busy() {
+    return this.active
+  }
+
+  /**
+   * @param {object} frame createFrame 产出的帧（用 width 算投影缩放）
+   * @param {Map<string, object>} glyphs buildGlyphs 的结果
+   * @param {number} now 秒
+   * @param {(frame:object, tex:object, cx:number, cy:number, size:number, tint:number[], alpha:number)=>void} blit
+   *   drawSprite；显式传进来，避免本模块依赖渲染器内部实现
+   */
+  draw(frame, glyphs, now, blit) {
+    if (!this.items.length || !glyphs || typeof blit !== 'function') return 0
+    const scale = frame.width / 44 // 与 project 同一把尺：44 单位铺满画布宽
+    let drawn = 0
+    for (const item of this.items) {
+      const t = (now - item.start) / LETTER_LIFE
+      if (t < 0 || t >= 1) continue
+      // 逐字符排版（MDP `label()`）：'Space' / 'Enter' / 'F12' 这类多字符键名
+      // 在 94 个单字模里查不到整串，必须拆开横排，否则这些键永远不显示。
+      const chars = []
+      let total = 0
+      for (const ch of item.label) {
+        const tex = glyphs.get(ch)
+        if (!tex) continue
+        const adv = advanceOf(tex, LETTER_SIZE)
+        chars.push({ tex, adv })
+        total += adv
+      }
+      if (!chars.length) continue
+      const p = project(item.pos, frame.width, frame.height)
+      // 向上飘 + 二次方淡出（MDP：alpha = 1 - t*t）
+      const y = p[1] - LETTER_RISE * t * scale
+      const alpha = 1 - t * t
+      let x = p[0] - total / 2
+      for (const c of chars) {
+        const cx = x + c.adv / 2
+        blit(frame, c.tex, cx + 1, y + 1, LETTER_SIZE, SHADOW_TINT, alpha * 0.45)
+        blit(frame, c.tex, cx, y, LETTER_SIZE, item.color, alpha)
+        x += c.adv
+        drawn++
+      }
+    }
+    return drawn
+  }
+
+  clear() {
+    this.items.length = 0
+  }
+}
+
+return { LETTER_LIFE, LETTER_MAX, LETTER_RISE, LETTER_SIZE, LETTER_COLORS, LetterField }
+})()
 var GESTURES = (function () {
 // 待机手势（P1）：伸懒腰 / 歪头 / 犯困 + 30~60s 随机调度器。
 // Ported from Minecraft-Desktop-Pet (MIT) — native/src/render_gestures.rs:6-9 时长,
@@ -1419,12 +2038,13 @@ var PET_ANIM = (function () {
 // M3 动效四件套：呼吸 / 眨眼 / 头部跟随鼠标 / 打字手臂。
 // Ported from Minecraft-Desktop-Pet (MIT) — native/src/render.rs:21, 506, 826-1054
 //
-// 所有动效都是「时间的纯函数 + 少量积分状态」，与 MDP 一致：
-// 没有速度/加速度，只有 breathing_weight 那一个指数衰减量。
+// 除呼吸权重外都是「时间的纯函数」。P2 加的物理模拟（spring.js）是唯一有速度状态的
+// 东西，只做次级运动：头部跟随的惯性、done 落地回弹、呼吸相位漂移（plan.md §6.6）。
 
 var { project, transformPoint } = SKIN_RENDER
 var { torsoSpace, bodySpace } = SKIN_MODEL
 var { GestureScheduler } = GESTURES
+var { Spring } = SPRING
 var Q = QUAT
 
 const DEG = Math.PI / 180
@@ -1476,6 +2096,8 @@ const DEFAULT_ANIM = {
   sensY: 1,
   rangeX: 45,
   rangeY: 30,
+  /** P2 物理模拟：落地回弹 + 头部跟随惯性 + 呼吸相位漂移（plan.md §6.6）。 */
+  physics: true,
 }
 
 /** 一次按键把该手压在键位上多久。MDP 是 0.15s，但那在快速打字（每秒 6~8 键）时
@@ -1494,6 +2116,8 @@ const PRESS_Y = 10.35
 const HOVER_Z = 8.8
 /** waiting 的跳跃高度（模型单位）。MDP 的 Bounce 用 3.6，这里取 3.0。 */
 const HOP_HEIGHT = 3.0
+/** 落地冲量（模型单位/秒）：k=140、ζ=0.5 下峰值约 0.7 单位，肉眼能看出来但不夸张。 */
+const LAND_IMPULSE = 9
 
 /**
  * 动效层：吃状态机产出的姿态，叠加时间驱动的动效后交给渲染器。
@@ -1522,6 +2146,13 @@ class PetAnimator {
     this.state = null
     this.stateStart = 0
     this.eyelid = 1
+
+    // —— P2 物理（plan.md §6.6）——
+    /** done 落地：一次冲量 → 压缩 → 回弹。ζ=0.5 有回弹，k=140 大约 0.6s 收完。 */
+    this.bounce = new Spring({ k: 140, zeta: 0.5 })
+    /** 头部跟随的惯性：目标角度变化时落后一点再追上。ζ=0.85 基本不过冲。 */
+    this.trackH = new Spring({ k: 160, zeta: 0.85 })
+    this.trackV = new Spring({ k: 160, zeta: 0.85 })
   }
 
   /**
@@ -1564,10 +2195,15 @@ class PetAnimator {
     // 状态专属动画（thinking 挠头 / waiting 跳两下 / done 举手后鼓掌）。
     const state = ctx.state || null
     if (state !== this.state) {
+      // plan §6.6 纪律 ②：状态一切换，物理状态归零——否则 done→idle 会带着残留速度歪着。
+      // 只有进入 done 时才给一次落地冲量（落地压缩 → 回弹）。
+      this.bounce.reset(0)
       this.state = state
       this.stateStart = now
+      if (state === 'done') this.bounce.impulse(LAND_IMPULSE)
     }
     if (state) this._stateAnim(p, state, now - this.stateStart)
+    if (s.physics) this._physics(p, dt)
     // 待机手势最后叠加（MDP 的 apply_gesture 也在 update 末尾）。
     // 不看会话状态：坐着打字时也会伸懒腰，真实按键由调用方 gestureInput() 打断。
     if (s.gesture) {
@@ -1589,12 +2225,28 @@ class PetAnimator {
     return !!(this.gestures.active || this.gestures.returnFrom)
   }
 
+  /** 物理还在动吗（帧需求分级用：收敛过程必须保持 60fps，否则会卡在半路）。 */
+  get physicsBusy() {
+    return !this.bounce.settled || !this.trackH.settled || !this.trackV.settled
+  }
+
+  /**
+   * 物理后处理：只叠次级运动，不改状态、不改骨骼以外的任何东西。
+   * 步长由 Spring 内部按固定 1/60 积分（plan §6.6 纪律 ①）。
+   */
+  _physics(p, dt) {
+    const sink = this.bounce.step(0, dt)
+    if (sink) p.sink = (p.sink || 0) + sink
+  }
+
   /** 呼吸：指数逼近的权重 + 0.10 单位的上下起伏 + 头/臂的细微跟随。 */
   _breath(p, s, now, dt) {
     const want = s.breath ? 1 : 0
     this.breath += (want - this.breath) * (1 - Math.exp(-dt * (want > 0 ? 2.5 : 20)))
     if (this.breath < 0.001) this.breath = 0
-    const wave = Math.sin(now * 1.7) * this.breath
+    // 呼吸相位漂移（P2）：周期不完全固定，看起来更"活"。只挪相位，振幅不变。
+    const drift = 0.18 * Math.sin(now * 0.13) + 0.09 * Math.sin(now * 0.37 + 1.7)
+    const wave = Math.sin(now * 1.7 + drift) * this.breath
     p.breathing_bob = 0.1 * wave
     if (this.breath > 0) {
       p.head_rotation = Q.multiply(p.head_rotation, Q.fromEuler(wave * 0.012, 0, 0))
@@ -1619,13 +2271,23 @@ class PetAnimator {
   _trackHead(p, ctx, s, now, dt) {
     const d = Math.max(dt || 0, 0)
     // 光标不在画布上：直接回中立（这条不需要过渡，否则指针一离开就残留偏角）
-    if (!ctx.cursor) { this.trackW = 0; return }
+    if (!ctx.cursor) {
+      this.trackW = 0
+      this.trackH.reset(0)
+      this.trackV.reset(0)
+      return
+    }
     // ctx.state 缺省时按 idle 处理（老调用点不传状态，语义上就是"默认状态"）
     const idle = ctx.state == null || ctx.state === 'idle'
     const want = (s.track && idle && !this.gestureBusy) ? 1 : 0
     this.trackW += (want - this.trackW) * (1 - Math.exp(-d / 0.12))
     if (this.trackW < 1e-3) this.trackW = 0
-    if (this.trackW === 0) return
+    if (this.trackW === 0) {
+      // 权重归零时把弹簧也归零：手势/状态结束后不能带着旧角度的惯性
+      this.trackH.reset(0)
+      this.trackV.reset(0)
+      return
+    }
 
     const W = ctx.width
     const H = ctx.height
@@ -1648,8 +2310,11 @@ class PetAnimator {
       s.rangeY * DEG,
     )
     // 权重乘在角度上：trackW=0 时目标是严格中立，与状态姿态的 head_rotation 一致
-    const horizontal = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
-    const vertical = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
+    const targetH = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
+    const targetV = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
+    // P2：角度过一层阻尼弹簧，转头有惯性、停下微微回弹（k=160 ζ=0.85，几乎不过冲）
+    const horizontal = s.physics ? this.trackH.step(targetH, d) : targetH
+    const vertical = s.physics ? this.trackV.step(targetV, d) : targetV
 
     const desired = Q.multiply(
       Q.multiply(
@@ -1864,6 +2529,8 @@ var DECORATIONS = (function () {
 //
 // 每个 cube 的局部坐标与尺寸都是常量，按 kind 缓存一次；每帧只做 mount × translate。
 
+var { geoParts } = GEO_MODEL
+
 // 调色板，取自 render_decorations.rs:5 的 palette。
 const WHITE = [244, 240, 241]
 const PINK = [246, 164, 184]
@@ -1872,7 +2539,8 @@ const BLUSH = [244, 164, 186]
 const CREAM = [250, 247, 237]
 const RED = [224, 42, 55]
 
-const DECORATIONS = ['none', 'rabbit', 'cat', 'heart', 'lollipop']
+/** duck 是 P2 的 Bedrock `.geo.json` 模型（见 geo-model.js），其余四种是纯色 cube。 */
+const DECORATIONS = ['none', 'rabbit', 'cat', 'heart', 'lollipop', 'duck']
 
 const TAU = Math.PI * 2
 
@@ -1959,12 +2627,18 @@ function localCubes(kind, heartTex) {
 /**
  * 生成装饰的 part 列表。
  * @param {object} headPart buildParts 里 key === 'head' 且 inflate === 0 的那个
- * @param {string} kind 'rabbit' | 'cat' | 'heart' | 'lollipop' | 'none'
- * @param {{heart?: object}} [assets] 爱心需要 assets/heart.png 的纹理
+ * @param {string} kind 'rabbit' | 'cat' | 'heart' | 'lollipop' | 'duck' | 'none'
+ * @param {{heart?: object, geo?: {model: object, texture: object}}} [assets]
+ *   爱心需要 heart.png 纹理；duck 需要已解析的 geo 模型 + 贴图
  */
 function decorationParts(headPart, kind, assets = {}) {
   if (!kind || kind === 'none') return []
   if (!headPart) return []
+  // Bedrock geo 模型：走 geoParts（自带底部对齐与贴图），不复用下面的纯色 cube 路径
+  if (kind === 'duck') {
+    if (!assets.geo || !assets.geo.model) return []
+    return geoParts(headPart, assets.geo.model, { texture: assets.geo.texture })
+  }
   const cubes = localCubes(kind, assets.heart)
   const mount = headMount(headPart)
   return cubes.map(([center, size, color]) => ({
@@ -2238,13 +2912,17 @@ return {
   quat: QUAT,
   render: SKIN_RENDER,
   model: SKIN_MODEL,
+  geo: GEO_MODEL,
+  spring: SPRING,
+  typeLetters: TYPE_LETTERS,
+  letters: LETTERS,
   gestures: GESTURES,
   state: PET_STATE,
   anim: PET_ANIM,
   effects: EFFECTS,
   decorations: DECORATIONS,
   status: STATUS_EFFECTS,
-  assets: { note: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAABGdBTUEAALGPC/xhBQAAADtJREFUGNNjYEADmzdv/j9p0qT/DLgASEFGRgZuRSAFIDowMBC7ArzGU6bg8+fP/2EOxKoAJAFyGLrjAGgoKj2JtoJgAAAAAElFTkSuQmCC", heart: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAABGdBTUEAALGPC/xhBQAAAEJJREFUGFdjYCAGXNbS+g/CWPkgxv+Wlv8fcnLAgiA8T0oKjDtFRP6DFcAkYRIYCnBJghXArMEpCQMwQaySMIBNEgDrRU46cj4m4QAAAABJRU5ErkJggg==" },
+  assets: { note: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAABGdBTUEAALGPC/xhBQAAADtJREFUGNNjYEADmzdv/j9p0qT/DLgASEFGRgZuRSAFIDowMBC7ArzGU6bg8+fP/2EOxKoAJAFyGLrjAGgoKj2JtoJgAAAAAElFTkSuQmCC", heart: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAABGdBTUEAALGPC/xhBQAAAEJJREFUGFdjYCAGXNbS+g/CWPkgxv+Wlv8fcnLAgiA8T0oKjDtFRP6DFcAkYRIYCnBJghXArMEpCQMwQaySMIBNEgDrRU46cj4m4QAAAABJRU5ErkJggg==", duck: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAg0lEQVR42u3TsQmAMBBG4ZtGbNI4iRu4kLVbuYEDWFrbnGgVhGBITMTkffAXgs09VOTBNvcaMgmwL4P6THIiAAEIQIAUAXyP/TwKAUoPEHpg7AhQe4Akv+vUqb2qAtyP945Q0hcAIM46GrX39vsEIMAPjnYt9H1k1jZGz7meAQAAAFwOF42TmjsZ+GkAAAAASUVORK5CYII=", duckGeo: "{\n  \"format_version\": \"1.12.0\",\n  \"minecraft:geometry\": [\n    {\n      \"description\": {\n        \"identifier\": \"geometry.dsh_pet_duck\",\n        \"texture_width\": 64,\n        \"texture_height\": 32,\n        \"visible_bounds_width\": 4,\n        \"visible_bounds_height\": 4,\n        \"visible_bounds_offset\": [\n          0,\n          2,\n          0\n        ]\n      },\n      \"bones\": [\n        {\n          \"name\": \"duck\",\n          \"pivot\": [\n            0,\n            0,\n            0\n          ],\n          \"cubes\": [\n            {\n              \"origin\": [\n                -3.5,\n                0.8,\n                -4\n              ],\n              \"size\": [\n                7,\n                5,\n                8\n              ],\n              \"uv\": [\n                0,\n                0\n              ]\n            },\n            {\n              \"origin\": [\n                -2.5,\n                5.8,\n                -4.5\n              ],\n              \"size\": [\n                5,\n                5,\n                5\n              ],\n              \"uv\": [\n                30,\n                0\n              ]\n            },\n            {\n              \"origin\": [\n                -1,\n                6.6,\n                -6.2\n              ],\n              \"size\": [\n                2,\n                1.2,\n                1\n              ],\n              \"uv\": [\n                50,\n                10\n              ]\n            },\n            {\n              \"origin\": [\n                -2.1,\n                8.4,\n                -4.9\n              ],\n              \"size\": [\n                0.8,\n                0.8,\n                0.3\n              ],\n              \"uv\": [\n                52,\n                20\n              ]\n            },\n            {\n              \"origin\": [\n                1.3,\n                8.4,\n                -4.9\n              ],\n              \"size\": [\n                0.8,\n                0.8,\n                0.3\n              ],\n              \"uv\": [\n                56,\n                20\n              ]\n            },\n            {\n              \"origin\": [\n                -2.6,\n                0,\n                -2\n              ],\n              \"size\": [\n                2,\n                0.8,\n                3\n              ],\n              \"uv\": [\n                0,\n                16\n              ]\n            },\n            {\n              \"origin\": [\n                0.6,\n                0,\n                -2\n              ],\n              \"size\": [\n                2,\n                0.8,\n                3\n              ],\n              \"uv\": [\n                12,\n                16\n              ]\n            }\n          ]\n        }\n      ]\n    }\n  ]\n}\n" },
 }
 })()
 // ==== DSH-PET BUNDLE END ====
@@ -2287,7 +2965,7 @@ return {
     cape: 'dshmp-cape',
   }
   var SCALES = [0.7, 0.85, 1, 1.15, 1.3]
-  var DECOS = ['none', 'rabbit', 'cat', 'heart', 'lollipop']
+  var DECOS = ['none', 'rabbit', 'cat', 'heart', 'lollipop', 'duck']
 
   var root = null
   var stage = null
@@ -2310,6 +2988,10 @@ return {
   var balance = null
   var noteTex = null
   var heartTex = null
+  var duckTex = null // P2-b：geo 小鸭的贴图
+  var duckModel = null // P2-b：解析后的 .geo.json
+  var glyphSet = null // P2-c：字模表（首次需要时造）
+  var lastPose = null // 最近一帧的姿态（按键时判断是不是坐姿）
   var account = null // /pet/account.json 的快照
   var accountBusy = false
   var lastAcctMsg = '' // 面板上最后一条文案（含失败原因），探针里也读得到
@@ -2569,7 +3251,7 @@ return {
     root.querySelector('[data-pierce]').textContent = opts.pierce ? '开' : '关'
     root.querySelector('[data-bubble]').textContent = opts.bubble ? '开' : '关'
     root.querySelector('[data-deco]').textContent =
-      ({ none: '无', rabbit: '兔耳', cat: '猫耳', heart: '爱心', lollipop: '棒棒糖' })[opts.deco] || '无'
+      ({ none: '无', rabbit: '兔耳', cat: '猫耳', heart: '爱心', lollipop: '棒棒糖', duck: '小鸭' })[opts.deco] || '无'
     renderAccount()
     if (btnEl) btnEl.style.display = opts.menuHidden ? 'none' : ''
     if (opts.pierce) ensureResumeBtn()
@@ -2629,6 +3311,7 @@ return {
           anim: new (load().anim.PetAnimator)(0),
           notes: new (load().effects.NoteField)(),
           status: new (load().status.StatusEffects)(),
+          letters: new (load().letters.LetterField)(),
           lastMs: 0,
         }
         var capeReady = eng.capeOn
@@ -2645,9 +3328,21 @@ return {
           textureFromUrl(load().assets.note),
           textureFromUrl(load().assets.heart),
           capeReady,
+          // P2-b：小鸭贴图 + 模型（两个都很小，直接跟角色一起加载）
+          textureFromUrl(load().assets.duck).catch(function () {
+            return null
+          }),
         ]).then(function (tex) {
           noteTex = tex[0]
           heartTex = tex[1]
+          duckTex = tex[3]
+          try {
+            duckModel = load().geo.parseGeo(load().assets.duckGeo)
+            if (duckTex) load().geo.checkTextureSize(duckModel, duckTex)
+          } catch (err) {
+            duckModel = null
+            window.__dshPetError = 'geo: ' + String((err && err.message) || err).slice(0, 200)
+          }
           scheduleFrame()
         })
       })
@@ -2668,6 +3363,15 @@ return {
       var d = cx.getImageData(0, 0, c.width, c.height)
       return load().render.textureFromImage({ width: c.width, height: c.height, data: d.data })
     })
+  }
+
+  /** P2-c 字模表：首次需要时才造（94 个字符约 5~10ms），之后复用。 */
+  function glyphs() {
+    if (glyphSet) return glyphSet
+    var T = load().typeLetters
+    var rasterize = T.canvasRasterizer(document)
+    glyphSet = rasterize ? T.buildGlyphs(rasterize) : new Map()
+    return glyphSet
   }
 
   // ---------------------------------------------------------------- 正版账号 / 披风（M5）
@@ -2937,6 +3641,9 @@ return {
   function demand() {
     if (!eng) return 0
     if (eng.notes.active || eng.status.active) return 2
+    if (eng.letters.active) return 2
+    // P2-a：物理还在收敛时要 60fps，否则回弹会卡在半路（plan.md §6.6 第 5 条）
+    if (eng.anim.physicsBusy) return 2
     if (eng.anim.gestureBusy) return 2
     // 阈值故意留宽：blinkClosure 的尾巴很长，eyelid 几乎总是 0.999x，
     // 用 0.999 判断等于「永远 60fps」。0.95 覆盖真正看得见闭合的那一段。
@@ -3040,16 +3747,27 @@ return {
       cape: opts.cape ? eng.capeTex : null,
     })
     var head = null
+    eng.kb = null
     for (var i = 0; i < parts.length; i++) {
       if (parts[i].key === 'head' && !parts[i].inflate) head = parts[i]
+      // 键盘的模型矩阵：按键时用它把「键位」换算成模型坐标（P2-c）
+      if (parts[i].key === 'keyboard') eng.kb = parts[i].transform
     }
+    lastPose = pose
     if (opts.deco !== 'none' && head) {
-      var extra = P.decorations.decorationParts(head, opts.deco, { heart: heartTex })
+      var extra = P.decorations.decorationParts(head, opts.deco, {
+        heart: heartTex,
+        geo: duckModel && duckTex ? { model: duckModel, texture: duckTex } : null,
+      })
       for (var j = 0; j < extra.length; j++) parts.push(extra[j])
     }
     R.drawParts(frame, parts, eng.skin)
     if (head) {
       eng.status.draw(frame, head, nowSec)
+      // P2-c：浮现字画在状态粒子之后、音符之前（plan.md §17.3 的顺序）。
+      // 没有字时连 glyphs() 都别调 —— 首次造 94 个字模要 5~10ms，不能挂在首帧上。
+      eng.letters.update(nowSec)
+      if (eng.letters.active) eng.letters.draw(frame, glyphs(), nowSec, R.drawSprite)
       eng.notes.draw(frame, head, noteTex, nowSec)
     }
     var rgba = R.toImageData(frame)
@@ -3204,6 +3922,28 @@ return {
     } catch (err) {}
   }
 
+  /**
+   * P2-c：把按键变成一枚浮现字。只在坐姿出现（plan.md §17.3 / MDP 的 is_sitting）。
+   * 键位来自 event.code（物理位置），文字来自 event.key（中文输入法组合期直接跳过）。
+   */
+  function pushLetter(e, nowSec) {
+    if (!eng || !eng.letters) return
+    var sitting = lastPose ? lastPose.sit > 0.4 : false
+    if (!sitting) return
+    var T = load().typeLetters
+    var label = T.keyLabelFromEvent(e)
+    var off = T.keyPositionFromCode(e.code)
+    if (!label || !off) return
+    var pos
+    if (eng.kb) {
+      pos = load().render.transformPoint(eng.kb, [off[0], 0.3, off[1]])
+    } else {
+      // 键盘还没画出来（刚开始敲）：按 sit=1 的键盘位置估一个，误差可忽略
+      pos = [off[0], 10.5, 9.4 + off[1]]
+    }
+    eng.letters.push(pos, label, nowSec)
+  }
+
   function bindGlobal() {
     window.addEventListener(
       'pointermove',
@@ -3270,6 +4010,7 @@ return {
           if (eng.anim.gestureInput) eng.anim.gestureInput(nowMs / 1000)
           lastRealPress = nowMs / 1000
           typingUntil = nowMs + 2000
+          pushLetter(e, nowMs / 1000)
           scheduleFrame()
         } catch (err) {}
       },
@@ -3300,6 +4041,8 @@ return {
         account: account && account.bound ? account.name : '',
         accountBusy: accountBusy,
         accountMsg: lastAcctMsg,
+        letters: eng.letters.count,
+        physicsBusy: eng.anim.physicsBusy,
         eyelid: eng.anim.eyelid,
         presses: eng.anim.counter,
         deco: opts.deco,

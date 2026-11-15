@@ -11,7 +11,10 @@ DSH（DeepSeek Harness）界面右下角的 **Minecraft 方块小人挂件**。
 ## 功能
 
 - **六态**：`idle` / `thinking` / `working` / `waiting` / `done` / `error`，优先级与最短停留沿用 DSH 会话语义
-- **动效**：呼吸、眨眼（需皮肤画了 DA 识别格）、头部跟随鼠标、打字手臂交替、待机手势（伸懒腰 / 歪头 / 犯困）、音符、状态粒子、装饰（兔耳 / 猫耳 / 爱心 / 棒棒糖）
+- **动效**：呼吸、眨眼（需皮肤画了 DA 识别格）、头部跟随鼠标、打字手臂交替、待机手势（伸懒腰 / 歪头 / 犯困）、音符、状态粒子、装饰（兔耳 / 猫耳 / 爱心 / 棒棒糖 / **小鸭**）
+- **敲字浮现字**：坐姿打字时，字符从对应按键上方升起，糖果色带阴影，0.8 秒淡出；中文输入法只显示键名
+- **物理模拟**：`done` 落地压缩回弹、转头惯性、呼吸相位漂移；固定 1/60 步长，30/60 fps 行为一致
+- **Bedrock 装饰**：可挂 `.geo.json` 骨骼盒子模型（内置一只自造小鸭），跟随头部旋转
 - **正版披风**：右键菜单 →「正版账号」，输入 Java 版用户名或 UUID，拉取该账号的皮肤、模型类型（classic/slim）与披风；解绑自动还原本地皮肤
 - **余额**：账号余额、今日已用、峰谷时段标记；拿不到数据时显示 `--`，不挡其他功能
 - **每轮消耗**：一轮结束后弹出「本轮 ¥0.00xx · N tok」
@@ -65,13 +68,17 @@ node tools/harness-server.mjs   # 假宿主：http://127.0.0.1:8788/prototype/pe
 
 node tools/test-quat.mjs        # 四元数
 node tools/test-state.mjs       # 状态机
-node tools/test-anim.mjs        # 动效
+node tools/test-anim.mjs        # 动效 + 阻尼弹簧物理
 node tools/test-m35.mjs         # 眨眼 / 音符 / 装饰 / 手势 / 粒子
 node tools/test-cape.mjs        # 披风几何 / UV / 无披风时基线不变
+node tools/test-geo.mjs         # Bedrock geo 解析 / pivot / 底部对齐 / 贴图校验
+node tools/test-letters.mjs     # 键名 / 键位 / 字模 / Letter 场 / 渲染集成
 node tools/test-host.mjs        # 宿主：路由 + 状态机 + 计费 + 栅栏 + 账号绑定（假 fetch）
 node tools/test-widget.mjs      # 挂件：语法 / 产物求值 / 接线 / 未定义函数扫描
 
+node tools/render-m0.mjs        # 静止帧基线（25928 px / c2c43ab4，改渲染前后对比）
 node tools/compare-cape.mjs     # 披风三联对照图 → prototype/m5-cape.png
+node tools/make-geo-duck.mjs    # 重造内置小鸭的 geo + 贴图
 ```
 
 设计取舍与踩过的坑都在 [`docs/HANDOFF.md`](docs/HANDOFF.md)，施工说明书是 [`docs/plan.md`](docs/plan.md)。
@@ -79,5 +86,5 @@ node tools/compare-cape.mjs     # 披风三联对照图 → prototype/m5-cape.pn
 ## 许可
 
 代码 MIT（见 [`LICENSE`](LICENSE)）。渲染与动效数学移植自 [Minecraft-Desktop-Pet](https://github.com/DLmember/Minecraft-Desktop-Pet)（MIT），
-逐文件标注见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。`assets/note.png`、`heart.png` 属于 Mojang/Microsoft，不在 MIT 范围内。
+逐文件标注见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。`assets/note.png`、`heart.png` 属于 Mojang/Microsoft，不在 MIT 范围内；`assets/decoration-duck.*` 与 `default-skin.png` 为本项目自造/默认素材。
 素材划界与 takedown 方式见 [`PROVENANCE.md`](PROVENANCE.md)。

@@ -11,21 +11,23 @@
 | `lib/*.js`、`lib/pet-data.mjs`、`assets/*.js`、`tools/**`、`prototype/**`、`cordis.patch.yml`、`package.json`、文档 | **MIT** |
 | `assets/note.png`、`assets/heart.png`（各 8×8，合计 271 B） | **不属于 MIT**：belongs to Mojang/Microsoft，按"小到可以忽略 + 不构成替代游戏内容"的规则内嵌，逐条标注 |
 | `assets/default-skin.png`、`prototype/da-skin.png` | **用户自备**的 64×64 皮肤，仅用于本地渲染与自检；本项目不主张权利，不随 npm 包分发 |
+| `assets/decoration-duck.geo.json`、`decoration-duck.png` | **本项目自造**（MIT）：由 `tools/make-geo-duck.mjs` 生成的 Bedrock 模型与 64×32 贴图，不含 Mojang 素材 |
 | `icon.png` | 由 `tools/make-icon.mjs` 用本项目的渲染器从皮肤实时渲染生成（512×512 透明 PNG），随 MIT 一并授权 |
 
-`assets/` 目录自 2026-11-14 的独立化重写（R4）起**只剩**：9 个自写渲染/动效模块、
-挂件本体 `widget.js`、默认皮肤与两张 Mojang 小贴图。旧版沿用的鲸鱼立绘、GIF、MP3/WAV
-音效已全部移除（见第四节）。
+`assets/` 目录自 2026-11-14 的独立化重写（R4）起只保留自写模块、挂件本体、默认皮肤、
+两张 Mojang 小贴图，以及 M5/P2 新增的账号无关素材（P2 的自造小鸭模型与贴图）。
+旧版沿用的鲸鱼立绘、GIF、MP3/WAV 音效已全部移除（见第四节）。
 
 ## 二、逐项来源
 
 | 文件 | 来源 / 说明 |
 |---|---|
-| `assets/quat.js`、`skin-render.js`、`skin-model.js`、`pet-state.js`、`pet-anim.js`、`effects.js`、`decorations.js`、`gestures.js`、`status-effects.js` | 本项目自写（MIT）；渲染与动效的**数学**移植自 Minecraft-Desktop-Pet（MIT，commit `63c96a8`），逐文件表见 `THIRD_PARTY_NOTICES.md` |
-| `assets/widget.js` | 本项目自写（MIT）。顶部 BUNDLE 段由 `tools/build-widget.mjs` 生成，内含上面 9 个模块 |
+| `assets/quat.js`、`skin-render.js`、`skin-model.js`、`pet-state.js`、`pet-anim.js`、`effects.js`、`decorations.js`、`gestures.js`、`status-effects.js`、`spring.js`、`geo-model.js`、`type-letters.js`、`letters.js` | 本项目自写（MIT）；渲染、动效、geo 解析与浮现字的**数学/数据结构**移植自 Minecraft-Desktop-Pet（MIT，commit `63c96a8`），逐文件表见 `THIRD_PARTY_NOTICES.md`。`spring.js` 例外：MDP 无物理，纯本项目新写 |
+| `assets/widget.js` | 本项目自写（MIT）。顶部 BUNDLE 段由 `tools/build-widget.mjs` 生成，内含上面 13 个模块 |
 | `assets/note.png`（132 B） | Minecraft Java 的粒子贴图，belongs to Mojang/Microsoft |
 | `assets/heart.png`（139 B） | 爱心装饰形状，belongs to Mojang/Microsoft |
 | `assets/default-skin.png`（1354 B） | 用户自备皮肤 |
+| `assets/decoration-duck.geo.json` + `decoration-duck.png` | 本项目自造（MIT），`tools/make-geo-duck.mjs` 生成 |
 | `lib/audio-meter.ps1` | 本项目自写（MIT）：WASAPI 峰值轮询，750ms 打印一行 `peak=` |
 
 ## 三、元数据清理

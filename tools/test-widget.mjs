@@ -82,6 +82,34 @@ if (PET) {
   const pose = a.update(m.pose(10), { width: 352, height: 416, state: 'thinking', armWidth: 4 }, 0.2, 0.016)
   check('状态机 + 动效可组合运行', okForce && pose && typeof a.eyelid === 'number')
   check('动效暴露 counter / gestureBusy / gestureInput（挂件壳用到）', typeof a.counter === 'number' && 'gestureBusy' in a && typeof a.gestureInput === 'function')
+
+  // P2 的四个新模块也必须真的在产物里（build-widget 的 MODULES 漏一个就会在这里炸）
+  for (const [mod, fns] of [
+    ['spring', ['Spring']],
+    ['geo', ['parseGeo', 'geoParts', 'checkTextureSize']],
+    ['typeLetters', ['buildGlyphs', 'keyLabelFromEvent', 'keyPositionFromCode', 'canvasRasterizer']],
+    ['letters', ['LetterField']],
+  ]) {
+    check(`产物暴露 ${mod} 模块`, !!PET[mod] && fns.every((f) => typeof PET[mod][f] === 'function'), fns.filter((f) => !PET[mod] || typeof PET[mod][f] !== 'function').join(','))
+  }
+  check('产物内嵌小鸭贴图与 geo 模型', String(PET.assets.duck || '').indexOf('data:image/png;base64,') === 0 && String(PET.assets.duckGeo || '').indexOf('minecraft:geometry') > 0)
+  const duck = PET.geo.parseGeo(PET.assets.duckGeo)
+  check('内嵌 geo 能解析出盒子', duck.parts.length >= 6, `${duck.parts.length} parts`)
+  check('内嵌 geo 的贴图尺寸能通过校验', (() => {
+    try {
+      PET.geo.checkTextureSize(duck, { width: 64, height: 32 })
+      return true
+    } catch (err) {
+      return false
+    }
+  })())
+  const spring = new PET.spring.Spring({ k: 140, zeta: 0.5 })
+  for (let i = 0; i < 120; i++) spring.step(10, 1 / 60)
+  check('弹簧能收敛（不是发散的积分）', Math.abs(spring.value - 10) < 0.01 && spring.settled, String(spring.value))
+  check('动效暴露 physicsBusy（帧需求分级用到）', 'physicsBusy' in a)
+  const field = new PET.letters.LetterField()
+  field.push([0, 10, 9], 'A', 0)
+  check('LetterField 能 push / active', field.active && field.count === 1)
 }
 
 // ③ 接线
@@ -98,6 +126,21 @@ check('绑定/解绑成功后都重拉角色（换皮 + 换披风）', (shell.ma
 check('绑定请求带超时，不会把按钮锁死', shell.indexOf('AbortController') >= 0 && shell.indexOf('请求超时（25 秒）') >= 0)
 check('菜单点击不会被画布拖动吃掉（inUi 守卫）', shell.indexOf('if (inUi(e.target)) return') >= 0 && shell.indexOf('function inUi') >= 0)
 check('失败原因在面板重开后仍可见（宿主 lastError）', shell.indexOf('account.lastError') >= 0)
+
+// P2 接线：三项都必须在挂件壳里真的被调用，不能只是产物里有模块
+check('菜单装饰列表含小鸭', shell.indexOf("'lollipop', 'duck'") >= 0 && shell.indexOf("duck: '小鸭'") >= 0)
+check('小鸭的贴图与 geo 在启动时加载', shell.indexOf('load().assets.duck') >= 0 && shell.indexOf('load().geo.parseGeo(load().assets.duckGeo)') >= 0)
+check('小鸭贴图尺寸校验失败会降级（不白屏）', shell.indexOf('load().geo.checkTextureSize(duckModel, duckTex)') >= 0 && shell.indexOf('duckModel = null') >= 0)
+check('draw 把 geo 模型递给 decorations', shell.indexOf('geo: duckModel && duckTex ? { model: duckModel, texture: duckTex } : null') >= 0)
+check('键盘矩阵每帧缓存给浮现字用', shell.indexOf("if (parts[i].key === 'keyboard') eng.kb = parts[i].transform") >= 0)
+check('LetterField 在引擎里实例化', shell.indexOf('letters: new (load().letters.LetterField)()') >= 0)
+check('keydown 会 push 一枚浮现字', shell.indexOf('pushLetter(e, nowMs / 1000)') >= 0)
+check('只在坐姿显示（sit > 0.4）', shell.indexOf('lastPose.sit > 0.4') >= 0)
+check('字模走 canvasRasterizer 且缓存', shell.indexOf('T.canvasRasterizer(document)') >= 0 && shell.indexOf('if (glyphSet) return glyphSet') >= 0)
+check('绘制顺序：浮现字在音符之前', shell.indexOf('eng.letters.draw(') < shell.indexOf('eng.notes.draw(') && shell.indexOf('eng.letters.draw(') > 0)
+check('没有字时不造字模（首帧零开销）', shell.indexOf('if (eng.letters.active) eng.letters.draw(') >= 0)
+check('帧需求：有字或物理未收敛时 60fps', shell.indexOf('if (eng.letters.active) return 2') >= 0 && shell.indexOf('if (eng.anim.physicsBusy) return 2') >= 0)
+check('探针暴露 letters / physicsBusy', shell.indexOf('letters: eng.letters.count') >= 0 && shell.indexOf('physicsBusy: eng.anim.physicsBusy') >= 0)
 check('披风开关持久化用 dshmp-cape', shell.indexOf("cape: 'dshmp-cape'") >= 0)
 check('localStorage 统一用 dshmp- 前缀', (src.match(/'dshmp-/g) || []).length >= 5)
 check('不残留 DWS 的 storage 前缀 dshw-', src.indexOf("'dshw") < 0)
