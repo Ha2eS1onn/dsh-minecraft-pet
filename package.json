@@ -1,6 +1,6 @@
 {
   "name": "dsh-minecraft-pet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH 界面右下角的 Minecraft 方块小人挂件：64×64 皮肤实时 Canvas 光栅化、六态姿态与动效、音符/装饰/待机手势/状态粒子，外加账号余额、今日已用、峰谷时段与每轮消耗提示",
   "keywords": [
     "dsh",
@@ -39,5 +39,8 @@
       "patch": "./cordis.patch.yml"
     }
   },
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org"
+  }
 }
