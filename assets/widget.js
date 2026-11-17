@@ -3044,6 +3044,8 @@ return {
   var FALL_MIN_V = 70 // 低于这个速度就停住（再弹就是肉眼看不见的抖）
   var FALL_MAX_BOUNCE = 2
   var FALL_FLOOR_GAP = 14 // 与 CSS 的 bottom:14px 对齐
+  /** 只有落点在屏幕左右边缘这 15% 之内才「落地 + 吸附」；中间区域原地停住。 */
+  var EDGE_BAND = 0.15
   // ?physics=off 可在真机上做 A/B：关掉后动效退回 P1（转头无惯性、不压缩）
   var animSettings = { physics: !/[?&]physics=off\b/.test(location.search) }
 
@@ -4062,8 +4064,14 @@ return {
     root.style.top = Math.round(fall.y) + 'px'
   }
 
-  function endFall() {
-    fall = null
+  /** 落点是否在屏幕左右边缘 15% 内（按挂件的左右边距算，不看光标）。 */
+  function nearEdgeZone(r) {
+    var band = window.innerWidth * EDGE_BAND
+    return r.left < band || window.innerWidth - r.right < band
+  }
+
+  /** 把当前位置落盘（opts 与 localStorage 都要写）。 */
+  function persistPos() {
     var r = root.getBoundingClientRect()
     var x = Math.round(r.left)
     var y = Math.round(r.top)
@@ -4071,6 +4079,11 @@ return {
     opts.x = x
     opts.y = y
     set(LS.pos, x + ',' + y)
+  }
+
+  function endFall() {
+    fall = null
+    persistPos()
   }
 
   function onDown(e) {
@@ -4170,12 +4183,17 @@ return {
         if (moved) {
           fallResume = null
           var r = root.getBoundingClientRect()
-          // 吸附：靠哪边就贴到哪边（左右 12px 内）
-          if (r.left < 12 || r.right > window.innerWidth - 12) {
-            var magnetLeft = r.left + r.width / 2 < window.innerWidth / 2
-            root.style.left = magnetLeft ? '12px' : window.innerWidth - r.width - 12 + 'px'
-            root.style.right = 'auto'
+          if (!nearEdgeZone(r)) {
+            // 中间区域：不吸附、也不落地 —— 放到哪就停在哪（用户 2026-11-17 要求）
+            fall = null
+            persistPos()
+            scheduleFrame()
+            return
           }
+          // 边缘区域：先横向贴到最近的边，再从松手高度自由落体到地板
+          var magnetLeft = r.left + r.width / 2 < window.innerWidth / 2
+          root.style.left = magnetLeft ? '12px' : window.innerWidth - r.width - 12 + 'px'
+          root.style.right = 'auto'
           if (r.top < 12) root.style.top = '12px'
           // 松手点是自由落体的起点：随后由 stepFall 积到地板并回弹（P2-a v2）
           var fin = root.getBoundingClientRect()

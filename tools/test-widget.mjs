@@ -169,6 +169,7 @@ check('帧需求：有字 / 物理在动 / 自由落体时都上 60fps', shell.i
 // P2-a v2 接线：真人按键带压缩、自动敲击不带、落地走像素积分并回馈 squash
 check('真人 keydown 带压缩、自动敲击显式关闭', shell.indexOf('eng.anim.press(nowMs / 1000, null, undefined, { squash: true })') >= 0 && shell.indexOf('{ squash: false }') >= 0)
 check('拖拽松手进入自由落体，落地触发 squash', shell.indexOf('function stepFall') >= 0 && shell.indexOf('startFall(top)') >= 0 && shell.indexOf('eng.anim.land(speed)') >= 0)
+check('只有左右 15% 边缘才落地吸附，中间原地停住', shell.indexOf('var EDGE_BAND = 0.15') >= 0 && shell.indexOf('function nearEdgeZone') >= 0 && shell.indexOf('if (!nearEdgeZone(r))') >= 0)
 check('物理探针暴露 squash / falling / enabled', shell.indexOf('squashBusy: !eng.anim.squash.settled') >= 0 && shell.indexOf('falling: !!fall') >= 0)
 check('physics=off 可做真机 A/B', shell.indexOf("physics: !/[?&]physics=off\\b/.test(location.search)") >= 0)
 check('探针暴露 letters / letterStat', shell.indexOf('letters: eng.letters.count') >= 0 && shell.indexOf('letterStat: {') >= 0)
