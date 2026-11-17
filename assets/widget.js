@@ -3044,8 +3044,8 @@ return {
   var FALL_MIN_V = 70 // 低于这个速度就停住（再弹就是肉眼看不见的抖）
   var FALL_MAX_BOUNCE = 2
   var FALL_FLOOR_GAP = 14 // 与 CSS 的 bottom:14px 对齐
-  /** 屏幕四边各 15% 是吸附带（上贴顶 / 下落地 / 左右贴边）；中间区域不吸附。 */
-  var EDGE_BAND = 0.15
+  /** 只有屏幕**底部 15%** 是吸附带（落地）；其余任何位置松手都不吸附、不落地。 */
+  var BOTTOM_BAND = 0.15
   // ?physics=off 可在真机上做 A/B：关掉后动效退回 P1（转头无惯性、不压缩）
   var animSettings = { physics: !/[?&]physics=off\b/.test(location.search) }
 
@@ -4065,18 +4065,11 @@ return {
   }
 
   /**
-   * 落点在屏幕四边各 15% 的哪几条吸附带里（按挂件自身边距算，不看光标）。
-   * 吸附方向 = 命中的那几条边：上贴顶、下落地、左右贴边；四条都不命中就是中间区域，不吸附。
+   * 落点是否在屏幕底部的吸附带里（按挂件自身底边算，不看光标）。
+   * 只有命中这里才「落地」；其它位置（含左右、顶部、屏幕中间）松手后原地停住。
    */
-  function edgeZone(r) {
-    var bw = window.innerWidth * EDGE_BAND
-    var bh = window.innerHeight * EDGE_BAND
-    return {
-      left: r.left < bw,
-      right: window.innerWidth - r.right < bw,
-      top: r.top < bh,
-      bottom: window.innerHeight - r.bottom < bh,
-    }
+  function inBottomBand(r) {
+    return window.innerHeight - r.bottom < window.innerHeight * BOTTOM_BAND
   }
 
   /** 把当前位置落盘（opts 与 localStorage 都要写）。 */
@@ -4192,32 +4185,19 @@ return {
         if (moved) {
           fallResume = null
           var r = root.getBoundingClientRect()
-          var z = edgeZone(r)
-          if (!z.left && !z.right && !z.top && !z.bottom) {
-            // 中间区域：不吸附、也不落地 —— 放到哪就停在哪（用户 2026-11-17 要求）
+          if (!inBottomBand(r)) {
+            // 除了屏幕底部 15%，其它位置都不吸附也不落地 —— 放到哪就停在哪
             fall = null
             persistPos()
             scheduleFrame()
             return
           }
-          // 横向：命中左/右带就贴到那一边（按挂件中心判断归哪边，避免"左右都命中"时乱跳）
-          if (z.left || z.right) {
-            var magnetLeft = z.left && !z.right ? true : !z.left ? false : r.left + r.width / 2 < window.innerWidth / 2
-            root.style.left = magnetLeft ? '12px' : window.innerWidth - r.width - 12 + 'px'
-            root.style.right = 'auto'
-          }
-          // 纵向：贴上边（只在顶带、且没同时命中底带时）不落地；否则一律落到地板并回弹
-          if (z.top && !z.bottom) {
-            root.style.top = '12px'
-            root.style.bottom = 'auto'
-            hitGround(320) // 吸住时给一次很轻的压缩，表示"贴上了"
-            endFall()
-            scheduleFrame()
-            return
-          }
+          // 底部带：落到地板并回弹；横向保持松手的位置，不再往左右两侧磁吸
           var fin = root.getBoundingClientRect()
           var top = Math.min(Math.max(0, fin.top), floorTop())
           root.style.top = Math.round(top) + 'px'
+          root.style.bottom = 'auto'
+          root.style.right = 'auto'
           startFall(top)
           scheduleFrame()
         } else if (fallResume) {
