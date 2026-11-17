@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import { decodePng } from './png.mjs'
 import { createFrame, clearFrame, skinFromImage, drawParts, toImageData, project, transformPoint } from '../assets/skin-render.js'
 import { buildParts, torsoSpace } from '../assets/skin-model.js'
-import { targetPose } from '../assets/pet-state.js'
+import { targetPose, PetStateMachine } from '../assets/pet-state.js'
 import { PetAnimator, blinkClosure, PRESS_SECONDS } from '../assets/pet-anim.js'
 import * as Q from '../assets/quat.js'
 
@@ -87,10 +87,11 @@ const CAM_VIEW = Q.multiply(Q.rotY(Math.atan2(30, 70)), Q.rotX(-Math.atan(23 / M
 {
   const anim = new PetAnimator(0)
   // 2026-11-14：头部跟随改成有条件 + 渐入（只有 idle、无待机手势才跟），
-  // 采样前先跑 20 帧让 trackW 收敛到 1，否则单帧采样量到的是 12% 的权重。
+  // 采样前先跑 60 帧让 trackW 收敛到 1（2026-11-18 起上升 τ=0.28，比原来的 0.12 慢），
+  // 否则单帧采样量到的是没收满的权重。
   const at = (x, y) => {
     let p = anim.update(targetPose('idle'), ctx({ track: true }, { x, y }), 0, 1 / 60)
-    for (let i = 0; i < 20; i += 1) p = anim.update(targetPose('idle'), ctx({ track: true }, { x, y }), 0, 1 / 60)
+    for (let i = 0; i < 60; i += 1) p = anim.update(targetPose('idle'), ctx({ track: true }, { x, y }), 0, 1 / 60)
     return p
   }
   // 脖子投影点：光标放这里才是「正对摄像机」；画布中心在它下方，会低头看
@@ -133,7 +134,8 @@ const CAM_VIEW = Q.multiply(Q.rotY(Math.atan2(30, 70)), Q.rotX(-Math.atan(23 / M
     anim.gestures.trigger('tilt', 0)
     let t = 0.2
     let during = steady
-    for (let i = 0; i < 60; i += 1) {
+    // 90 帧（1.5s）：trackW 现在是指数衰减（τ=0.16），1s 时还有 0.2%，1.5s 才吸附到 0
+    for (let i = 0; i < 90; i += 1) {
       during = anim.update(targetPose('idle'), ctx({ track: true }, { x: W * 0.95, y: neutral.y }), t, 1 / 60)
       t += 1 / 60
     }
@@ -148,6 +150,37 @@ const CAM_VIEW = Q.multiply(Q.rotY(Math.atan2(30, 70)), Q.rotX(-Math.atan(23 / M
     const back = dotAngle(during.head_rotation, steady.head_rotation)
     check('手势结束后跟随角恢复', back < 0.15, `与手势前差 ${back.toFixed(3)} rad`)
   }
+}
+
+// 3b) 切状态时头部不能瞬跳（2026-11-18）
+{
+  const dot = (a, b) => Math.abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3])
+  const deg = (a, b) => (2 * Math.acos(Math.min(1, dot(a, b))) * 180) / Math.PI
+  const runSwitch = (from, to) => {
+    const sm = new PetStateMachine(0)
+    const anim = new PetAnimator(0)
+    const c = (st) => ({ width: W, height: H, cursor: { x: 40, y: 100 }, state: st, armWidth: 4 })
+    let t = 0
+    if (from !== 'idle') sm.force(from, 0)
+    for (let i = 0; i < 90; i += 1) {
+      anim.update(sm.pose(t * 1000), c(from), t, 1 / 60)
+      t += 1 / 60
+    }
+    let prev = anim.update(sm.pose(t * 1000), c(from), t, 1 / 60)
+    sm.force(to, t * 1000)
+    let max = 0
+    for (let i = 0; i < 60; i += 1) {
+      const p = anim.update(sm.pose(t * 1000), c(to), t, 1 / 60)
+      max = Math.max(max, deg(prev.head_rotation, p.head_rotation))
+      prev = p
+      t += 1 / 60
+    }
+    return max
+  }
+  // 门槛 5°/帧：跟手时正常转头也在 2~3°/帧，超过 5 就是肉眼可辨的「跳一下」
+  check('切到 thinking 时头部不瞬跳', runSwitch('idle', 'thinking') < 5)
+  check('切到 waiting 时头部不瞬跳', runSwitch('idle', 'waiting') < 5)
+  check('从 thinking 回 idle 时头部不瞬跳', runSwitch('thinking', 'idle') < 5)
 }
 
 // 4) 打字（MDP 结构：按键事件驱动、按压 0.15s、无按键时双手悬停）

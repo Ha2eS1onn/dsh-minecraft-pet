@@ -2169,6 +2169,11 @@ const SNAP = 1e-3
 const HOVER_Y = 11.85
 const PRESS_Y = 10.35
 const HOVER_Z = 8.8
+/** 状态专属动作的渐入时长（秒），与 `pet-state.js` 的 TRANSITION_MS=180 对齐。 */
+const STATE_RAMP = 0.18
+/** 0..1 的 smoothstep，与 `pet-state.js` 里的同名曲线一致。 */
+const smoothstep = (u) => u * u * (3 - 2 * u)
+
 /** waiting 的跳跃高度（模型单位）。MDP 的 Bounce 用 3.6，这里取 3.0。 */
 const HOP_HEIGHT = 3.0
 
@@ -2207,6 +2212,9 @@ class PetAnimator {
     /** 当前会话语义状态与它开始的时刻，供状态专属动画算相位。 */
     this.state = null
     this.stateStart = 0
+    /** 上一个状态与它的起点：切走后 180ms 内用它们把旧动作渐出。 */
+    this.prevState = null
+    this.prevStateStart = 0
     this.eyelid = 1
   }
 
@@ -2270,10 +2278,19 @@ class PetAnimator {
     // 状态专属动画（thinking 挠头 / waiting 跳两下 / done 举手后鼓掌）。
     const state = ctx.state || null
     if (state !== this.state) {
+      this.prevState = this.state
+      this.prevStateStart = this.stateStart
       this.state = state
       this.stateStart = now
     }
-    if (state) this._stateAnim(p, state, now - this.stateStart)
+    // 当前状态按 180ms 渐入；紧接着把上一个状态的额外动作按 1-u 渐出，
+    // 两条曲线在切换点首尾相接，头/手不会一帧弹回静态姿势。
+    const since = now - this.stateStart
+    const ramp = smoothstep(clamp01(since / STATE_RAMP))
+    if (state) this._stateExtra(p, state, since, ramp)
+    if (this.prevState && since < STATE_RAMP) {
+      this._stateExtra(p, this.prevState, now - this.prevStateStart, 1 - ramp)
+    }
     // 待机手势最后叠加（MDP 的 apply_gesture 也在 update 末尾）。
     // 不看会话状态：坐着打字时也会伸懒腰，真实按键由调用方 gestureInput() 打断。
     if (s.gesture) {
@@ -2356,18 +2373,18 @@ class PetAnimator {
     // ctx.state 缺省时按 idle 处理（老调用点不传状态，语义上就是"默认状态"）
     const idle = ctx.state == null || ctx.state === 'idle'
     const want = (s.track && idle && !this.gestureBusy) ? 1 : 0
-    if (phys) {
-      // want 当开关用，平滑全交给弹簧；收到中立且已收敛时彻底撒手，保证与 P1 逐位同源
-      this.trackW = want
-      if (want === 0 && this.headYaw.settled && this.headPitch.settled) {
-        this.headYaw.reset(0)
-        this.headPitch.reset(0)
-        return
-      }
-    } else {
-      this.trackW += (want - this.trackW) * (1 - Math.exp(-d / 0.12))
-      if (this.trackW < 1e-3) this.trackW = 0
-      if (this.trackW === 0) return
+    // trackW 只当**混合权重**：在「跟随朝向」和「状态姿态自带角度」之间过渡，
+    // 不再参与角度缩放（缩放会和弹簧叠成两层平滑）。切状态 / 起手势时它从 1 平滑落到 0，
+    // 头部就不会从"看着鼠标"一帧跳回状态姿势的默认角度。
+    // 上升慢、下降快：回升时头部是从状态姿势「转过去看鼠标」，太快就像瞬移；
+    // 下降时状态动作已经在渐入，交接要利落一点。
+    const tau = want > this.trackW ? 0.28 : 0.16
+    this.trackW += (want - this.trackW) * (1 - Math.exp(-d / tau))
+    if (this.trackW < 1e-3) {
+      this.trackW = 0
+      this.headYaw.reset(0)
+      this.headPitch.reset(0)
+      return
     }
 
     const W = ctx.width
@@ -2391,8 +2408,8 @@ class PetAnimator {
       s.rangeY * DEG,
     )
     // 权重乘在目标角上：want=0 时目标是严格中立，与状态姿态的 head_rotation 一致
-    const wantH = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
-    const wantV = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
+    const wantH = clamp(x, -Math.PI / 2, Math.PI / 2) * want
+    const wantV = clamp(y, -85 * DEG, 85 * DEG) * want
     const horizontal = phys ? this.headYaw.step(wantH, d) : wantH
     const vertical = phys ? this.headPitch.step(wantV, d) : wantV
 
@@ -2406,7 +2423,11 @@ class PetAnimator {
     // parent 只取躯干自身的旋转；MDP 里是 model_rotation × crouch 倾斜 × 自定义姿态。
     // 我们的 torsoSpace 只叠了 body_pitch，其余都是平移。
     const parent = Q.rotX(p.body_pitch)
-    p.head_rotation = Q.multiply(Q.conjugate(parent), desired)
+    const tracked = Q.multiply(Q.conjugate(parent), desired)
+    // 权重满时与 P1 逐位一致；权重衰减时朝「状态姿态自带的角度」过渡，
+    // 状态切换本身还有 180ms 的 slerp 在跑，两者叠起来是一条连续曲线。
+    p.head_rotation =
+      this.trackW > 0.999 ? tracked : Q.slerp(p.head_rotation || Q.identity(), tracked, this.trackW)
     p.yaw = FRONT_YAW + horizontal
     p.pitch = vertical
   }
@@ -2472,37 +2493,45 @@ class PetAnimator {
   }
 
   /** 状态专属的时间动画。t = 进入该状态后的秒数。 */
-  _stateAnim(p, state, t) {
-    if (state === 'thinking') this._thinkingAnim(p, t)
-    else if (state === 'waiting') this._waitingAnim(p, t)
-    else if (state === 'done') this._doneAnim(p, t)
+  /**
+   * 状态专属动作：**只产出「额外叠加量」，按权重 w 合成**，不直接写死姿态。
+   * w=1 用于当前状态；切走后的 180ms 内用旧状态 + 递减的 w 再叠一次 ——
+   * 否则这些绝对姿态（thinking 的歪头 9°、抬手到 -160°）会在切走那一帧突然消失。
+   */
+  _stateExtra(p, state, t, w) {
+    if (w <= 0) return
+    if (state === 'thinking') this._thinkingAnim(p, t, w)
+    else if (state === 'waiting') this._waitingAnim(p, t, w)
+    else if (state === 'done') this._doneAnim(p, t, w)
   }
 
   /** thinking：右手举到与 waiting 相同的位置，叠前后小幅摆动（挠头），同时歪头。 */
-  _thinkingAnim(p, t) {
+  _thinkingAnim(p, t, w) {
     // 摆动 0.64Hz、±5°：第一版是 1.4Hz、±8°，像在快速抓挠，放慢收小后更像「思考时摸头」。
     // 手臂位置 = waiting 的单手举起再向外撇 0.22 rad：不撇会与歪过去的头穿模（见 HANDOFF 坑 #25）。
     // 用 rotX 构造而不是 fromRotationArc：手臂接近竖直时后者在 180° 附近会算飞。
     const sway = Math.sin(t * 4) * 5 * DEG
-    p.arms[1] = Q.multiply(Q.rotZ(0.22), Q.rotX(-160 * DEG + sway))
+    const raised = Q.multiply(Q.rotZ(0.22), Q.rotX(-160 * DEG + sway))
+    p.arms[1] = w >= 1 ? raised : Q.slerp(p.arms[1], raised, w)
     // 歪头：9° 基准 + 每 3.7s 一次的轻轻摆动。
-    p.head_rotation = Q.multiply(p.head_rotation, Q.rotZ(0.16 + Math.sin(t * 1.7) * 0.03))
+    const tilt = 0.16 + Math.sin(t * 1.7) * 0.03
+    p.head_rotation = Q.multiply(p.head_rotation, Q.slerp(Q.identity(), Q.rotZ(tilt), w))
   }
 
   /** waiting：进入状态后跳两下（不循环），之后保持单手举高站着。 */
-  _waitingAnim(p, t) {
+  _waitingAnim(p, t, w) {
     // 两跳各 0.75s，中间回落：0.1~0.85、1.05~1.8，之后不再跳。
     const hop = (a, b) =>
       t < a || t >= b ? 0 : Math.sin((Math.PI * (t - a)) / (b - a)) * HOP_HEIGHT
-    p.sink = (p.sink || 0) - (hop(0.1, 0.85) + hop(1.05, 1.8))
+    p.sink = (p.sink || 0) - (hop(0.1, 0.85) + hop(1.05, 1.8)) * w
   }
 
   /** done：先举手（0~0.9s 沿用静态上举），再放下双手鼓掌到状态结束。 */
-  _doneAnim(p, t) {
+  _doneAnim(p, t, w) {
     const RAISE = 0.9
     if (t < RAISE) return
     const x = Math.min(1, (t - RAISE) / 0.35)
-    const u = x * x * (3 - 2 * x)
+    const u = x * x * (3 - 2 * x) * w
     // 照 MDP render_gestures.rs:277 Clap：双手在身前合拢，gap 正弦开合；
     // 手末端 x = ±gap、y = -2.8，gap ≈ 2 时两只手刚好碰上。
     const clap = (t - RAISE) * Math.PI * 2 * 2.4
