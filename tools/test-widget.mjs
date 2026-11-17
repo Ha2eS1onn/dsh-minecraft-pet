@@ -149,6 +149,11 @@ check('菜单点击不会被画布拖动吃掉（inUi 守卫）', shell.indexOf(
 check('失败原因在面板重开后仍可见（宿主 lastError）', shell.indexOf('account.lastError') >= 0)
 
 // P2 接线：三项都必须在挂件壳里真的被调用，不能只是产物里有模块
+// 2026-11-18：⋮ 按钮去掉，改右键开菜单；气泡大小/位置可自定义
+check('没有 ⋮ 按钮，右键（contextmenu）打开菜单', shell.indexOf('dshmp-btn') < 0 && shell.indexOf("'contextmenu'") >= 0 && shell.indexOf('function openMenuAt') >= 0)
+check('菜单按光标位置弹出并夹在视口内', shell.indexOf('window.innerWidth - mw - 8') >= 0 && shell.indexOf('menuEl.style.left') >= 0)
+check('气泡大小档位（data-bstep + BUB_MIN/MAX/STEP）', shell.indexOf('data-bstep') >= 0 && shell.indexOf('var BUB_STEP = 0.1') >= 0 && shell.indexOf('opts.bubScale') >= 0)
+check('气泡可拖动并把位置存成相对比例', shell.indexOf('bubbleDrag') >= 0 && shell.indexOf('function placeBubble') >= 0 && shell.indexOf('dshmp-bubpos') >= 0)
 check('菜单装饰列表含小鸭', shell.indexOf("'lollipop', 'duck'") >= 0 && shell.indexOf("duck: '小鸭'") >= 0)
 check('小鸭的贴图与 geo 在启动时加载', shell.indexOf('load().assets.duck') >= 0 && shell.indexOf('load().geo.parseGeo(load().assets.duckGeo)') >= 0)
 check('小鸭贴图尺寸校验失败会降级（不白屏）', shell.indexOf('load().geo.checkTextureSize(duckModel, duckTex)') >= 0 && shell.indexOf('duckModel = null') >= 0)

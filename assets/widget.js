@@ -3067,6 +3067,8 @@ return {
     menu: 'dshmp-menu',
     deco: 'dshmp-deco',
     cape: 'dshmp-cape',
+    bubscale: 'dshmp-bubscale',
+    bubpos: 'dshmp-bubpos',
   }
   var SCALES = [0.7, 0.85, 1, 1.15, 1.3]
   var DECOS = ['none', 'rabbit', 'cat', 'heart', 'lollipop', 'duck']
@@ -3078,11 +3080,16 @@ return {
   var bubbleEl = null
   var toastEl = null
   var menuEl = null
-  var btnEl = null
-  var pierceBtn = null
+  /** 正在拖动气泡：{ dx, dy, moved }。 */
+  var bubbleDrag = null
 
   var eng = null // 渲染引擎
-  var opts = { scale: 1, flip: false, pierce: false, bubble: true, menuHidden: false, deco: 'none', cape: true, x: -1, y: -1 }
+  /** bubble 是开关；bubScale 是气泡缩放（0.6~1.6）；bubPos 是气泡在 stage 里的相对位置（0..1，1=贴右边/下边）。 */
+  var opts = { scale: 1, flip: false, pierce: false, bubble: true, deco: 'none', cape: true, x: -1, y: -1, bubScale: 1, bubPos: { x: 1, y: 0 } }
+  /** 气泡大小档位步长与范围。 */
+  var BUB_MIN = 0.6
+  var BUB_MAX = 1.6
+  var BUB_STEP = 0.1
   var hostState = 'idle' // 宿主上报的六态
   var pendingState = '' // 连续两次同一状态才 force（过滤宿主抖动）
   var cursor = null
@@ -3183,9 +3190,12 @@ return {
     'left:' + ((-CROP.x / CROP.w) * 100).toFixed(2) + '%;' +
     'top:' + ((-CROP.y / CROP.h) * 100).toFixed(2) + '%;}' +
     '.dshmp-root.is-flip .dshmp-stage canvas{transform:scaleX(-1)}' +
-    '.dshmp-bubble{position:absolute;right:6px;top:2px;display:flex;gap:6px;align-items:center;' +
+    '.dshmp-bubble{position:absolute;left:0;top:0;display:flex;gap:6px;align-items:center;' +
     'padding:4px 9px;border-radius:999px;background:rgba(24,24,28,.82);border:1px solid rgba(255,255,255,.10);' +
-    'box-shadow:0 4px 12px rgba(0,0,0,.28);white-space:nowrap;cursor:default}' +
+    'box-shadow:0 4px 12px rgba(0,0,0,.28);white-space:nowrap;cursor:grab;' +
+    // 大小与位置都由 JS 算（opts.bubScale / opts.bubPos），这里只给兜底原点
+    'transform-origin:100% 0}' +
+    '.dshmp-bubble.is-drag{cursor:grabbing}' +
     '.dshmp-bubble.off{display:none}' +
     '.dshmp-bubble b{font-weight:600;font-size:13px}' +
     '.dshmp-bubble .u{opacity:.62}' +
@@ -3196,15 +3206,12 @@ return {
     'background:rgba(24,24,28,.88);border:1px solid rgba(255,255,255,.10);font-size:11px;' +
     'opacity:0;transform:translateY(-4px);transition:opacity .18s,transform .18s;pointer-events:none}' +
     '.dshmp-toast.on{opacity:1;transform:none}' +
-    '.dshmp-btn{position:absolute;right:4px;bottom:2px;width:20px;height:20px;border-radius:50%;' +
-    'background:rgba(24,24,28,.72);border:1px solid rgba(255,255,255,.14);color:#cfcfd6;' +
-    'font-size:11px;line-height:18px;text-align:center;cursor:pointer;opacity:0;transition:opacity .15s}' +
-    '.dshmp-root:hover .dshmp-btn{opacity:1}' +
-    '.dshmp-menu{position:absolute;right:0;bottom:26px;width:190px;padding:6px;border-radius:12px;' +
+    // 右键在光标处弹出：left/top 由 openMenuAt() 按视口夹取后写入
+    '.dshmp-menu{position:absolute;left:0;top:0;width:190px;padding:6px;border-radius:12px;' +
     'background:rgba(22,22,26,.94);border:1px solid rgba(255,255,255,.12);' +
     'box-shadow:0 10px 26px rgba(0,0,0,.42);display:none;' +
-    // 账号面板展开后菜单会变高，别顶出画布上沿
-    'max-height:calc(100% - 34px);overflow-y:auto;overscroll-behavior:contain}' +
+    // 账号面板展开后菜单会变高，别顶出屏幕
+    'max-height:min(360px, calc(100vh - 16px));overflow-y:auto;overscroll-behavior:contain}' +
     '.dshmp-menu.on{display:block}' +
     '.dshmp-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 7px;' +
     'border-radius:8px;cursor:pointer}' +
@@ -3289,9 +3296,15 @@ return {
     opts.flip = get(LS.flip, '0') === '1'
     opts.pierce = get(LS.pierce, '0') === '1'
     opts.bubble = get(LS.bubble, '1') !== '0'
-    opts.menuHidden = get(LS.menu, '0') === '1'
     opts.deco = DECOS.indexOf(get(LS.deco, 'none')) >= 0 ? get(LS.deco, 'none') : 'none'
     opts.cape = get(LS.cape, '1') !== '0'
+    opts.bubScale = Math.max(BUB_MIN, Math.min(BUB_MAX, Number(get(LS.bubscale, 1)) || 1))
+    var bp = String(get(LS.bubpos, '') || '').split(',')
+    if (bp.length === 2) {
+      var bx = Number(bp[0])
+      var by = Number(bp[1])
+      if (isFinite(bx) && isFinite(by)) opts.bubPos = { x: Math.max(0, Math.min(1, bx)), y: Math.max(0, Math.min(1, by)) }
+    }
     var p = String(get(LS.pos, '') || '').split(',')
     opts.x = isFinite(Number(p[0])) && p[0] !== '' ? Number(p[0]) : -1
     opts.y = isFinite(Number(p[1])) && p[1] !== '' ? Number(p[1]) : -1
@@ -3306,12 +3319,13 @@ return {
       '<div class="dshmp-bubble off"><b>--</b><span class="u" data-today>今日 --</span><span class="dshmp-tag" data-tag>--</span></div>' +
       '<div class="dshmp-toast"></div>' +
       '</div>' +
-      '<div class="dshmp-btn" title="菜单">⋮</div>' +
       '<div class="dshmp-menu">' +
       '<div class="dshmp-row" data-row="scale"><span>大小</span><div class="dshmp-step"><i data-step="-1">−</i><b data-scale>100%</b><i data-step="1">+</i></div></div>' +
       '<div class="dshmp-row" data-row="flip"><span>水平翻转</span><b data-flip>关</b></div>' +
       '<div class="dshmp-row" data-row="pierce"><span>鼠标穿透</span><b data-pierce>关</b></div>' +
       '<div class="dshmp-row" data-row="bubble"><span>余额气泡</span><b data-bubble>开</b></div>' +
+      '<div class="dshmp-row" data-row="bubsize"><span>气泡大小</span><div class="dshmp-step"><i data-bstep="-1">−</i><b data-bscale>100%</b><i data-bstep="1">+</i></div></div>' +
+      '<div class="dshmp-row" data-row="bubpos"><span>气泡位置</span><b data-bpos>右上</b></div>' +
       '<div class="dshmp-row" data-row="deco"><span>装饰</span><b data-deco>无</b></div>' +
       '<div class="dshmp-row" data-row="cape"><span>披风</span><b data-cape>无</b></div>' +
       '<div class="dshmp-row" data-row="account"><span>正版账号</span><b data-account>未绑定</b></div>' +
@@ -3333,7 +3347,6 @@ return {
     bubbleEl = root.querySelector('.dshmp-bubble')
     toastEl = root.querySelector('.dshmp-toast')
     menuEl = root.querySelector('.dshmp-menu')
-    btnEl = root.querySelector('.dshmp-btn')
     try {
       c2d = canvas.getContext('2d', { willReadFrequently: true })
     } catch (err) {
@@ -3370,9 +3383,80 @@ return {
     root.querySelector('[data-deco]').textContent =
       ({ none: '无', rabbit: '兔耳', cat: '猫耳', heart: '爱心', lollipop: '棒棒糖', duck: '小鸭' })[opts.deco] || '无'
     renderAccount()
-    if (btnEl) btnEl.style.display = opts.menuHidden ? 'none' : ''
+    applyBubble()
     if (opts.pierce) ensureResumeBtn()
     else removeResumeBtn()
+  }
+
+  // ---------------------------------------------------------------- 气泡（大小 / 位置）
+
+  /** 位置标签：贴着角就报角名，拖到中间就报「自定义」。 */
+  function bubPosLabel() {
+    var near = function (v, t) { return Math.abs(v - t) < 0.06 }
+    var x = opts.bubPos.x
+    var y = opts.bubPos.y
+    if (near(y, 0)) return near(x, 1) ? '右上' : near(x, 0) ? '左上' : '上方'
+    if (near(y, 1)) return near(x, 1) ? '右下' : near(x, 0) ? '左下' : '下方'
+    return '自定义'
+  }
+
+  function renderBubbleMenu() {
+    if (!menuEl) return
+    var a = menuEl.querySelector('[data-bscale]')
+    if (a) a.textContent = Math.round(opts.bubScale * 100) + '%'
+    var b = menuEl.querySelector('[data-bpos]')
+    if (b) b.textContent = bubPosLabel()
+  }
+
+  /** 按**可见左上角**摆放：缩放原点取离得近的那个角，先算可见框再反推布局 left/top。 */
+  function placeBubble(vx, vy) {
+    if (!bubbleEl) return
+    var w = bubbleEl.offsetWidth
+    var h = bubbleEl.offsetHeight
+    var s = opts.bubScale
+    var ox = opts.bubPos.x > 0.5 ? 1 : 0
+    var oy = opts.bubPos.y > 0.5 ? 1 : 0
+    bubbleEl.style.transform = 'scale(' + s + ')'
+    bubbleEl.style.transformOrigin = (ox ? '100%' : '0') + ' ' + (oy ? '100%' : '0')
+    bubbleEl.style.left = Math.round(ox ? vx + w * s - w : vx) + 'px'
+    bubbleEl.style.top = Math.round(oy ? vy + h * s - h : vy) + 'px'
+  }
+
+  /** 把 0..1 的相对位置换算成实际像素 —— 改缩放、改尺寸、窗口 resize 都要重跑。 */
+  function applyBubble() {
+    if (!bubbleEl || !stage) return
+    var sw = stage.clientWidth
+    var sh = stage.clientHeight
+    if (!sw || !sh) return
+    var w = (bubbleEl.offsetWidth || 0) * opts.bubScale
+    var h = (bubbleEl.offsetHeight || 0) * opts.bubScale
+    placeBubble(Math.max(0, sw - w) * opts.bubPos.x, Math.max(0, sh - h) * opts.bubPos.y)
+  }
+
+  /** 气泡当前可见框在 stage 内的位置，拖动时用来反算比例。 */
+  function bubbleVisual() {
+    var st = stage.getBoundingClientRect()
+    var r = bubbleEl.getBoundingClientRect()
+    return { st: st, left: r.left - st.left, top: r.top - st.top, w: r.width, h: r.height }
+  }
+
+  // ---------------------------------------------------------------- 菜单开合
+
+  function closeMenu() {
+    if (menuEl) menuEl.className = 'dshmp-menu'
+  }
+
+  /** 右键在光标处打开：按视口夹住，避免菜单跑出屏幕。 */
+  function openMenuAt(cx, cy) {
+    menuEl.className = 'dshmp-menu on'
+    renderBubbleMenu()
+    var mw = menuEl.offsetWidth || 190
+    var mh = menuEl.offsetHeight || 240
+    var r = root.getBoundingClientRect()
+    var vx = Math.max(8, Math.min(cx, window.innerWidth - mw - 8))
+    var vy = Math.max(8, Math.min(cy, window.innerHeight - mh - 8))
+    menuEl.style.left = Math.round(vx - r.left) + 'px'
+    menuEl.style.top = Math.round(vy - r.top) + 'px'
   }
 
   // 穿透状态下整块都在 pointer-events:none，点击会落到页面上；留一个小圆点才能自己出来
@@ -3698,6 +3782,7 @@ return {
       today.textContent = '今日 ' + (balance && isFinite(balance.todayUsed) ? '¥' + money(balance.todayUsed) : '--')
       tag.textContent = '离线'
       tag.className = 'dshmp-tag'
+      applyBubble() // 文字变短/变长后要重新贴角
       return
     }
     main.textContent = '¥' + money(balance.balance)
@@ -3705,6 +3790,7 @@ return {
     var peak = balance.period === 'peak' || balance.peak
     tag.textContent = peak ? '峰' : '谷'
     tag.className = 'dshmp-tag' + (peak ? '' : ' valley')
+    applyBubble()
   }
 
   function showToast(text) {
@@ -3929,16 +4015,38 @@ return {
   }
 
   function bindLocal() {
-    btnEl.addEventListener('pointerdown', function (e) {
-      e.stopPropagation()
-      menuEl.className = 'dshmp-menu' + (menuEl.className.indexOf('on') >= 0 ? '' : ' on')
-    })
-
     root.addEventListener('pointerdown', onDown, true)
     root.addEventListener('pointerdown', function (e) {
-      if (menuEl.className.indexOf('on') >= 0 && !menuEl.contains(e.target) && e.target !== btnEl) {
-        menuEl.className = 'dshmp-menu'
+      var open = menuEl.className.indexOf('on') >= 0
+      if (open && !menuEl.contains(e.target)) closeMenu()
+    })
+
+    // 右键打开菜单（⋮ 按钮已去掉）：在光标处弹出，按视口夹住不出屏
+    root.addEventListener(
+      'contextmenu',
+      function (e) {
+        if (!eng) return
+        if (menuEl.contains(e.target)) return
+        e.preventDefault()
+        e.stopPropagation()
+        openMenuAt(e.clientX, e.clientY)
+      },
+      true
+    )
+
+    // 气泡可拖动：位置存成 stage 内的相对比例，改缩放/尺寸后仍贴着原来的角
+    bubbleEl.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return
+      e.preventDefault()
+      e.stopPropagation()
+      bubbleDrag = {
+        dx: e.clientX - bubbleEl.getBoundingClientRect().left,
+        dy: e.clientY - bubbleEl.getBoundingClientRect().top,
       }
+      bubbleEl.className = 'dshmp-bubble is-drag' + (opts.bubble ? '' : ' off')
+      try {
+        bubbleEl.setPointerCapture(e.pointerId)
+      } catch (err) {}
     })
 
     menuEl.addEventListener('pointerdown', function (e) {
@@ -3963,6 +4071,15 @@ return {
         unbindAccountNow()
         return
       }
+      var bstep = e.target.getAttribute && e.target.getAttribute('data-bstep')
+      if (bstep) {
+        var next = Math.round((opts.bubScale + Number(bstep) * BUB_STEP) * 10) / 10
+        opts.bubScale = Math.max(BUB_MIN, Math.min(BUB_MAX, next))
+        set(LS.bubscale, opts.bubScale)
+        applyBubble()
+        renderBubbleMenu()
+        return
+      }
       var step = e.target.getAttribute && e.target.getAttribute('data-step')
       if (step) {
         var i = SCALES.indexOf(opts.scale)
@@ -3982,10 +4099,25 @@ return {
       } else if (k === 'pierce') {
         opts.pierce = !opts.pierce
         set(LS.pierce, opts.pierce ? '1' : '0')
-        menuEl.className = 'dshmp-menu'
+        closeMenu()
       } else if (k === 'bubble') {
         opts.bubble = !opts.bubble
         set(LS.bubble, opts.bubble ? '1' : '0')
+      } else if (k === 'bubpos') {
+        // 点一下在四个角之间循环；想放别处就直接拖气泡
+        var corners = [[1, 0], [0, 0], [0, 1], [1, 1]]
+        var at = -1
+        var best = 9
+        for (var ci = 0; ci < corners.length; ci++) {
+          var d = Math.abs(corners[ci][0] - opts.bubPos.x) + Math.abs(corners[ci][1] - opts.bubPos.y)
+          if (d < best) { best = d; at = ci }
+        }
+        var nextCorner = best < 0.12 ? corners[(at + 1) % corners.length] : corners[0]
+        opts.bubPos = { x: nextCorner[0], y: nextCorner[1] }
+        set(LS.bubpos, opts.bubPos.x + ',' + opts.bubPos.y)
+        applyBubble()
+        renderBubbleMenu()
+        return
       } else if (k === 'deco') {
         opts.deco = DECOS[(DECOS.indexOf(opts.deco) + 1) % DECOS.length]
         set(LS.deco, opts.deco)
@@ -4009,7 +4141,7 @@ return {
         root.style.right = '18px'
         root.style.bottom = '14px'
         set(LS.pos, '')
-        menuEl.className = 'dshmp-menu'
+        closeMenu()
       }
       applyOpts()
       scheduleFrame()
@@ -4026,7 +4158,7 @@ return {
   function inUi(target) {
     if (!target) return false
     if (menuEl && menuEl.contains(target)) return true
-    if (btnEl && (btnEl === target || btnEl.contains(target))) return true
+    if (bubbleEl && (bubbleEl === target || bubbleEl.contains(target))) return true
     if (resumeBtn && (resumeBtn === target || resumeBtn.contains(target))) return true
     return false
   }
@@ -4162,9 +4294,30 @@ return {
   }
 
   function bindGlobal() {
+    // 点挂件以外的地方也关菜单（右键菜单的习惯），点在菜单内不受影响
+    document.addEventListener(
+      'pointerdown',
+      function (e) {
+        if (menuEl && menuEl.className.indexOf('on') >= 0 && !menuEl.contains(e.target)) closeMenu()
+      },
+      true
+    )
+
     window.addEventListener(
       'pointermove',
       function (e) {
+        if (bubbleDrag) {
+          var v = bubbleVisual()
+          if (v.st.width && v.st.height) {
+            var maxX = Math.max(0, v.st.width - v.w)
+            var maxY = Math.max(0, v.st.height - v.h)
+            var bx = Math.max(0, Math.min(maxX, e.clientX - v.st.left - bubbleDrag.dx))
+            var by = Math.max(0, Math.min(maxY, e.clientY - v.st.top - bubbleDrag.dy))
+            placeBubble(bx, by)
+            bubbleDrag.moved = true
+          }
+          return
+        }
         if (drag) {
           var w = root.offsetWidth
           var h = root.offsetHeight
@@ -4194,6 +4347,24 @@ return {
     window.addEventListener(
       'pointerup',
       function () {
+        if (bubbleDrag) {
+          var bm = bubbleDrag.moved
+          bubbleDrag = null
+          bubbleEl.className = 'dshmp-bubble' + (opts.bubble ? '' : ' off')
+          if (bm) {
+            var v = bubbleVisual()
+            var maxX = Math.max(1, v.st.width - v.w)
+            var maxY = Math.max(1, v.st.height - v.h)
+            opts.bubPos = {
+              x: Math.max(0, Math.min(1, v.left / maxX)),
+              y: Math.max(0, Math.min(1, v.top / maxY)),
+            }
+            set(LS.bubpos, opts.bubPos.x.toFixed(3) + ',' + opts.bubPos.y.toFixed(3))
+            applyBubble()
+            renderBubbleMenu()
+          }
+          return
+        }
         if (!drag) return
         var moved = drag.moved
         drag = null
@@ -4252,6 +4423,7 @@ return {
 
     window.addEventListener('resize', function () {
       if (fall) fall.floor = floorTop()
+      applyBubble()
       if (opts.x >= 0 && opts.y >= 0) {
         var r = root.getBoundingClientRect()
         if (r.right > window.innerWidth || r.bottom > window.innerHeight) {
@@ -4288,6 +4460,7 @@ return {
         eyelid: eng.anim.eyelid,
         presses: eng.anim.counter,
         // P2-a v2：物理探针 —— 真机上「看不出来」时用它区分「没生效」和「幅度太小」
+        bubble: { scale: opts.bubScale, pos: opts.bubPos, label: bubPosLabel() },
         physics: {
           enabled: animSettings.physics !== false,
           squash: eng.anim.squash.value,
