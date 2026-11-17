@@ -3044,7 +3044,7 @@ return {
   var FALL_MIN_V = 70 // 低于这个速度就停住（再弹就是肉眼看不见的抖）
   var FALL_MAX_BOUNCE = 2
   var FALL_FLOOR_GAP = 14 // 与 CSS 的 bottom:14px 对齐
-  /** 只有落点在屏幕左右边缘这 15% 之内才「落地 + 吸附」；中间区域原地停住。 */
+  /** 屏幕四边各 15% 是吸附带（上贴顶 / 下落地 / 左右贴边）；中间区域不吸附。 */
   var EDGE_BAND = 0.15
   // ?physics=off 可在真机上做 A/B：关掉后动效退回 P1（转头无惯性、不压缩）
   var animSettings = { physics: !/[?&]physics=off\b/.test(location.search) }
@@ -4064,10 +4064,19 @@ return {
     root.style.top = Math.round(fall.y) + 'px'
   }
 
-  /** 落点是否在屏幕左右边缘 15% 内（按挂件的左右边距算，不看光标）。 */
-  function nearEdgeZone(r) {
-    var band = window.innerWidth * EDGE_BAND
-    return r.left < band || window.innerWidth - r.right < band
+  /**
+   * 落点在屏幕四边各 15% 的哪几条吸附带里（按挂件自身边距算，不看光标）。
+   * 吸附方向 = 命中的那几条边：上贴顶、下落地、左右贴边；四条都不命中就是中间区域，不吸附。
+   */
+  function edgeZone(r) {
+    var bw = window.innerWidth * EDGE_BAND
+    var bh = window.innerHeight * EDGE_BAND
+    return {
+      left: r.left < bw,
+      right: window.innerWidth - r.right < bw,
+      top: r.top < bh,
+      bottom: window.innerHeight - r.bottom < bh,
+    }
   }
 
   /** 把当前位置落盘（opts 与 localStorage 都要写）。 */
@@ -4183,19 +4192,29 @@ return {
         if (moved) {
           fallResume = null
           var r = root.getBoundingClientRect()
-          if (!nearEdgeZone(r)) {
+          var z = edgeZone(r)
+          if (!z.left && !z.right && !z.top && !z.bottom) {
             // 中间区域：不吸附、也不落地 —— 放到哪就停在哪（用户 2026-11-17 要求）
             fall = null
             persistPos()
             scheduleFrame()
             return
           }
-          // 边缘区域：先横向贴到最近的边，再从松手高度自由落体到地板
-          var magnetLeft = r.left + r.width / 2 < window.innerWidth / 2
-          root.style.left = magnetLeft ? '12px' : window.innerWidth - r.width - 12 + 'px'
-          root.style.right = 'auto'
-          if (r.top < 12) root.style.top = '12px'
-          // 松手点是自由落体的起点：随后由 stepFall 积到地板并回弹（P2-a v2）
+          // 横向：命中左/右带就贴到那一边（按挂件中心判断归哪边，避免"左右都命中"时乱跳）
+          if (z.left || z.right) {
+            var magnetLeft = z.left && !z.right ? true : !z.left ? false : r.left + r.width / 2 < window.innerWidth / 2
+            root.style.left = magnetLeft ? '12px' : window.innerWidth - r.width - 12 + 'px'
+            root.style.right = 'auto'
+          }
+          // 纵向：贴上边（只在顶带、且没同时命中底带时）不落地；否则一律落到地板并回弹
+          if (z.top && !z.bottom) {
+            root.style.top = '12px'
+            root.style.bottom = 'auto'
+            hitGround(320) // 吸住时给一次很轻的压缩，表示"贴上了"
+            endFall()
+            scheduleFrame()
+            return
+          }
           var fin = root.getBoundingClientRect()
           var top = Math.min(Math.max(0, fin.top), floorTop())
           root.style.top = Math.round(top) + 'px'
