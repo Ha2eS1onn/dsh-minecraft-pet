@@ -3046,6 +3046,15 @@ return {
   var FALL_FLOOR_GAP = 14 // 与 CSS 的 bottom:14px 对齐
   /** 只有屏幕**底部 15%** 是吸附带（落地）；其余任何位置松手都不吸附、不落地。 */
   var BOTTOM_BAND = 0.15
+  /**
+   * 显示裁切框（P2-a，2026-11-17）：画布固定 352×416，但人物只占其中一段
+   * （各姿态并集 x 62~247、y 43~335），四周那圈透明像素会让挂件永远贴不到屏幕边。
+   * 这里按并集取一个**关于 x=176 对称**的框，左右各留 6 px 余量，只在显示层裁掉空白，
+   * 渲染缓冲、投影、命中检测全都不动 —— hitFrame 用 canvas 自身 rect 换算，天然对得上。
+   * 对称是为了 `is-flip` 的 scaleX(-1) 仍以人物为中心镜像。
+   * 上边只裁到 y=2：状态图标（问号/灯泡/感叹号）会被 clamp 到 size/2+2 ≈ 2 px 处。
+   */
+  var CROP = { x: 56, y: 2, w: 240, h: 342 }
   // ?physics=off 可在真机上做 A/B：关掉后动效退回 P1（转头无惯性、不压缩）
   var animSettings = { physics: !/[?&]physics=off\b/.test(location.search) }
 
@@ -3163,11 +3172,16 @@ return {
     'font:12px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;color:#e8e8ea;' +
     'user-select:none;-webkit-user-select:none;touch-action:none}' +
     '.dshmp-root.is-pierce{pointer-events:none}' +
-    '.dshmp-stage{position:relative;width:100%;aspect-ratio:352/416;' +
-    // 画布 416 高里脚底在 80% 处，往下挪一点才是「站在屏幕底边」
-    'transform:translateY(7%);filter:drop-shadow(0 6px 14px rgba(0,0,0,.28));cursor:grab}' +
+    '.dshmp-stage{position:relative;width:100%;aspect-ratio:' + CROP.w + '/' + CROP.h + ';overflow:hidden;' +
+    // 脚底在裁切框底部（y≈333/342），不再需要往下挪
+    'filter:drop-shadow(0 6px 14px rgba(0,0,0,.28));cursor:grab}' +
     '.dshmp-root.is-drag .dshmp-stage{cursor:grabbing}' +
-    '.dshmp-stage canvas{display:block;width:100%;height:100%;image-rendering:auto}' +
+    // 画布仍按 352×416 铺，靠负偏移把 CROP 那块移到容器里，超出的空白被 overflow 裁掉
+    '.dshmp-stage canvas{display:block;position:absolute;max-width:none;image-rendering:auto;' +
+    'width:' + ((W / CROP.w) * 100).toFixed(2) + '%;' +
+    'height:' + ((H / CROP.h) * 100).toFixed(2) + '%;' +
+    'left:' + ((-CROP.x / CROP.w) * 100).toFixed(2) + '%;' +
+    'top:' + ((-CROP.y / CROP.h) * 100).toFixed(2) + '%;}' +
     '.dshmp-root.is-flip .dshmp-stage canvas{transform:scaleX(-1)}' +
     '.dshmp-bubble{position:absolute;right:6px;top:2px;display:flex;gap:6px;align-items:center;' +
     'padding:4px 9px;border-radius:999px;background:rgba(24,24,28,.82);border:1px solid rgba(255,255,255,.10);' +
@@ -3331,10 +3345,12 @@ return {
   }
 
   function applyOpts() {
-    var w = Math.round(282 * opts.scale)
-    // 小窗口别把整个人顶出屏幕：高度最多占 60%，再反推宽度（352:416 定比例）
+    // 282 是「整张 352 宽画布」时代的基准宽；按裁切比例缩回去，屏幕上的人物大小不变，
+    // 变小的只是四周那圈空白（挂件因此能更贴边）
+    var w = Math.round(282 * opts.scale * (CROP.w / W))
+    // 小窗口别把整个人顶出屏幕：高度最多占 60%，再按裁切框比例反推宽度
     var maxH = Math.max(150, window.innerHeight * 0.6)
-    w = Math.min(w, Math.round((maxH * W) / H))
+    w = Math.min(w, Math.round((maxH * CROP.w) / CROP.h))
     root.style.width = w + 'px'
     if (opts.x >= 0 && opts.y >= 0) {
       root.style.left = opts.x + 'px'

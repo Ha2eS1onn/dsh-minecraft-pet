@@ -170,6 +170,7 @@ check('帧需求：有字 / 物理在动 / 自由落体时都上 60fps', shell.i
 check('真人 keydown 带压缩、自动敲击显式关闭', shell.indexOf('eng.anim.press(nowMs / 1000, null, undefined, { squash: true })') >= 0 && shell.indexOf('{ squash: false }') >= 0)
 check('拖拽松手进入自由落体，落地触发 squash', shell.indexOf('function stepFall') >= 0 && shell.indexOf('startFall(top)') >= 0 && shell.indexOf('eng.anim.land(speed)') >= 0)
 check('只有底部 15% 吸附带会落地，其它位置原地停住', shell.indexOf('var BOTTOM_BAND = 0.15') >= 0 && shell.indexOf('function inBottomBand') >= 0 && shell.indexOf('if (!inBottomBand(r))') >= 0)
+check('显示裁切框按 CROP 计算（stage 比例 + 画布负偏移 + 宽度补偿）', shell.indexOf('var CROP = { x: 56, y: 2, w: 240, h: 342 }') >= 0 && shell.indexOf('overflow:hidden') >= 0 && shell.indexOf('(W / CROP.w) * 100') >= 0 && shell.indexOf('(CROP.w / W)') >= 0)
 check('底部吸附不再做左右磁吸', shell.indexOf('magnetLeft') < 0)
 check('物理探针暴露 squash / falling / enabled', shell.indexOf('squashBusy: !eng.anim.squash.settled') >= 0 && shell.indexOf('falling: !!fall') >= 0)
 check('physics=off 可做真机 A/B', shell.indexOf("physics: !/[?&]physics=off\\b/.test(location.search)") >= 0)
