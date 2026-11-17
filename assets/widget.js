@@ -728,6 +728,11 @@ const KEYBOARD_COLOR = [0x83, 0x87, 0x8a]
 /** 键帽比键盘底色暗 22%（MDP `key_gray = gray * 0.78`）。 */
 const KEYCAP_COLOR = [102, 105, 108]
 
+/** 压缩形变（果冻）：squash=1 时高度压到 78%、横向鼓到 113%。
+ *  取值依据：站立 32 单位高、8 px/单位，squash 峰值约 0.42 ⇒ 头顶下沉约 3 单位 ≈ 24 px。 */
+const SQUASH_Y = 0.22
+const SQUASH_XZ = 0.13
+
 /** 静止姿态：所有字段为 0/identity，渲染结果必须与 M0 基线逐像素一致。 */
 function defaultPose() {
   return {
@@ -736,6 +741,8 @@ function defaultPose() {
     sink: 0,
     /** 模型空间整体平移（伸懒腰的身体抖动），[x, y, z] 或 null。 */
     shake: null,
+    /** 压缩量（P2-a v2）：1 = 压到最扁，负值 = 拉长。以脚底 y=0 为支点做非等比缩放。 */
+    squash: 0,
     yaw: 0,
     pitch: 0,
     body_yaw: 0,
@@ -790,6 +797,8 @@ function bodySpace(p) {
 }
 
 /** 供动效层复用的空间矩阵（M3 的头部跟随与打字需要求肩点/脖子位置）。 */
+/** 压缩形变系数：`tools/bench-physics.mjs` 用它把 squash 换算成像素位移。 */
+const SQUASH_SHAPE = { y: SQUASH_Y, xz: SQUASH_XZ, height: 32 }
 
 /**
  * 骨架构建。
@@ -934,6 +943,19 @@ function buildParts(
     }
   }
 
+  // 压缩形变（P2-a v2，打字与落地用）：以**脚底 y=0** 为支点的非等比缩放，
+  // 高度压扁、横向鼓起，读起来才有「果冻」的体积感；只平移不改轮廓的写法 v1 已经证伪。
+  // 放在 shake 之前：抖动是绝对位移，不该被压缩量再缩放一次。
+  // 键盘在下面才 push，所以不吃压缩 —— 它是场景物件，不是角色的肉。
+  if (p.squash) {
+    const sq = Math.max(-0.45, Math.min(1, p.squash))
+    const m = scale(1 + SQUASH_XZ * sq, 1 - SQUASH_Y * sq, 1 + SQUASH_XZ * sq)
+    for (const part of parts) {
+      if (part.kind === 'quad') part.pos = part.pos.map((v) => transformPoint(m, v))
+      else part.transform = multiply(m, part.transform)
+    }
+  }
+
   // 伸懒腰的身体抖动：MDP 的 `gesture_shake` 是模型空间的世界平移（render.rs:1463），
   // 左乘在每个角色 part 上，所以整个身体（含头）一起抖，而不只是手臂。
   // 键盘不算角色，MDP 也是在 shake 之后才 push 键盘，因此键盘不吃抖动。
@@ -997,7 +1019,7 @@ function staticParts(skin, opts) {
   return buildParts(defaultPose(), skin, opts)
 }
 
-return { OVERLAY_UV, defaultPose, buildParts, staticParts, baseBody, torsoSpace, bodySpace }
+return { OVERLAY_UV, defaultPose, SQUASH_SHAPE, buildParts, staticParts, baseBody, torsoSpace, bodySpace }
 })()
 var GEO_MODEL = (function () {
 // Bedrock `.geo.json` 装饰模型（P2-b，plan.md §6.7）。
@@ -1950,6 +1972,94 @@ class PetStateMachine {
 
 return { PET_STATES, PET_PRIORITY, MIN_STAY_MS, TERMINAL_MS, IDLE_TIMEOUT_MS, TRANSITION_MS, blendPose, targetPose, PoseTransition, PetStateMachine }
 })()
+var SPRING = (function () {
+// 阻尼弹簧（P2-a 物理，v2 已接线）。
+//
+// v1 于 2026-11-15 整体回退过一次（效果幅度只有 2.8 px、且无条件开），v2 按
+// docs/physics-redesign.md 重做：只做三个事件驱动的次级运动 —— 打字压缩回弹、
+// 拖拽落地回弹、转头惯性；`enabled` 默认**开**，关掉后必须逐像素回到 P1。
+//
+// MDP 里没有物理（全项目 spring/damping/velocity 零命中），这块是新写的。
+// 三条硬纪律：
+//   ① 固定步长 1/60，用累加器跑 N 次，**不按实际帧间隔积分** —— 否则 30fps 与 60fps 行为不同
+//   ② 支持瞬间重置：状态切换时归零，避免「从 done 回 idle 后带着残留速度歪着」
+//   ③ 不参与状态判定：物理只做次级运动，状态仍由事件驱动
+//
+// 用法：
+//   const s = new Spring({ k: 140, zeta: 0.5 })
+//   s.impulse(9)          // 给一次初速度（落地/被推）
+//   s.step(0, dt)         // 每帧推进，返回当前值
+//   s.settled             // 帧需求分级用：还在动就要 60fps
+
+const SPRING_DT = 1 / 60
+/** 单帧最多补算几步：卡顿后不要一次补 100 步把主线程堵住。 */
+const MAX_SUBSTEPS = 8
+
+class Spring {
+  /**
+   * @param {{k?:number, zeta?:number, value?:number, eps?:number}} [opts]
+   *   k 刚度（越大越快）、zeta 阻尼比（1 = 临界阻尼不振荡，0.5~0.8 有回弹）
+   */
+  constructor({ k = 120, zeta = 1, value = 0, eps = 1e-3 } = {}) {
+    this.k = k
+    this.zeta = zeta
+    this.c = 2 * Math.sqrt(k) * zeta
+    this.value = value
+    this.velocity = 0
+    this.target = value
+    this.eps = eps
+    this.acc = 0
+  }
+
+  /** 直接给速度（模型单位/秒）。落地回弹就是一次 impulse。 */
+  impulse(v) {
+    this.velocity += v
+    return this
+  }
+
+  /** 瞬间归零（状态切换时调；plan §6.6 纪律 ②）。 */
+  reset(value = 0) {
+    this.value = value
+    this.target = value
+    this.velocity = 0
+    this.acc = 0
+    return this
+  }
+
+  get settled() {
+    return Math.abs(this.value - this.target) < this.eps && Math.abs(this.velocity) < this.eps
+  }
+
+  /**
+   * 推进一帧。
+   * @param {number} target 目标值
+   * @param {number} dt 真实帧间隔（秒）；内部按固定步长积分
+   * @returns {number} 当前值
+   */
+  step(target, dt) {
+    this.target = target
+    const d = Math.max(0, Math.min(0.25, dt || 0))
+    this.acc += d
+    let n = 0
+    while (this.acc >= SPRING_DT && n < MAX_SUBSTEPS) {
+      const a = -this.k * (this.value - target) - this.c * this.velocity
+      this.velocity += a * SPRING_DT
+      this.value += this.velocity * SPRING_DT
+      this.acc -= SPRING_DT
+      n++
+    }
+    if (n === MAX_SUBSTEPS) this.acc = 0
+    // 收敛后吸附：不吸附的话 settled 永远为假，帧需求会一直卡在 60fps
+    if (Math.abs(this.value - target) < this.eps && Math.abs(this.velocity) < this.eps) {
+      this.value = target
+      this.velocity = 0
+    }
+    return this.value
+  }
+}
+
+return { SPRING_DT, Spring }
+})()
 var PET_ANIM = (function () {
 // M3 动效四件套：呼吸 / 眨眼 / 头部跟随鼠标 / 打字手臂。
 // Ported from Minecraft-Desktop-Pet (MIT) — native/src/render.rs:21, 506, 826-1054
@@ -1960,6 +2070,7 @@ var PET_ANIM = (function () {
 var { project, transformPoint } = SKIN_RENDER
 var { torsoSpace, bodySpace } = SKIN_MODEL
 var { GestureScheduler } = GESTURES
+var { Spring } = SPRING
 var Q = QUAT
 
 const DEG = Math.PI / 180
@@ -2011,6 +2122,37 @@ const DEFAULT_ANIM = {
   sensY: 1,
   rangeX: 45,
   rangeY: 30,
+  /** P2-a v2 物理：打字压缩回弹 / 落地回弹 / 转头惯性。
+   *  关掉必须与 P1 逐像素一致（转头退回 trackW 指数平滑、squash 恒为 0）。 */
+  physics: true,
+}
+
+/**
+ * 物理参数表（P2-a v2，2026-11-17 用户定效果、数值先这样，后续可微调）。
+ *
+ * 三条都是从「看得见」反推的（`node tools/bench-physics.mjs` 有完整表），
+ * 画布 352×416、8 px/模型单位、站立 32 单位高：
+ * - squash: 单次冲量峰值 0.31 ⇒ 头顶下沉 **17.6 px**、约 300 ms 收敛、回弹时拉长 5~6 px
+ * - squash 连打: 90 ms 一个键时靠 `repeatGain` 衰减，峰值不再累加（17.6 px），
+ *   键间谷值 7 px ⇒ 每键都有一次可见的压缩-回弹，而不是一直蹲着
+ * - head:  30° 阶跃过冲约 3°、150 ms 到位、320 ms 稳定；再大就成了「黏」
+ * - 落地在挂件侧用像素重力积分，这里只把冲击速度换算成 squash 冲量
+ */
+const PHYSICS = {
+  squash: {
+    k: 360,
+    zeta: 0.42,
+    impulse: 13,
+    eps: 0.02,
+    /** 已经压着的时候再加冲量只给 40%，避免快速连打叠成持续下蹲。 */
+    repeatAt: 0.2,
+    repeatGain: 0.4,
+  },
+  head: { k: 520, zeta: 0.58, eps: 0.004 },
+  /** 落地冲击归一化：1200 px/s 视为满力，低于 380 只给三成，上限 1.2 倍。 */
+  landFull: 1200,
+  landFloor: 0.3,
+  landMax: 1.2,
 }
 
 /** 一次按键把该手压在键位上多久。MDP 是 0.15s，但那在快速打字（每秒 6~8 键）时
@@ -2053,6 +2195,15 @@ class PetAnimator {
     this.handX = [4.2, -4.2]
     /** 待机手势调度器（M3.5）。 */
     this.gestures = new GestureScheduler()
+    /** 压缩弹簧（P2-a v2）：打字与落地共用一个通道，目标恒为 0，全靠 impulse 推动。 */
+    this.squash = new Spring({
+      k: PHYSICS.squash.k,
+      zeta: PHYSICS.squash.zeta,
+      eps: PHYSICS.squash.eps,
+    })
+    /** 转头惯性（P2-a v2）：水平/垂直各一根，目标角走弹簧而不是瞬时赋值。 */
+    this.headYaw = new Spring({ k: PHYSICS.head.k, zeta: PHYSICS.head.zeta, eps: PHYSICS.head.eps })
+    this.headPitch = new Spring({ k: PHYSICS.head.k, zeta: PHYSICS.head.zeta, eps: PHYSICS.head.eps })
     /** 当前会话语义状态与它开始的时刻，供状态专属动画算相位。 */
     this.state = null
     this.stateStart = 0
@@ -2066,12 +2217,31 @@ class PetAnimator {
    * @param {number} now 秒
    * @param {[number, number]|null} key 键位偏移 [x, y]（y 用于 z 方向），null 即交替模式
    * @param {number} [side] 指定手；不传则按 MDP 的 counter 交替
+   * @param {{squash?: boolean}} [opts] `squash:false` 用于**自动敲击**（AI 干活时的节拍）——
+   *   按用户 2026-11-17 的要求，压缩回弹只跟真人打字走，不然 working 状态会一直抖。
    */
-  press(now, key = null, side) {
+  press(now, key = null, side, opts = {}) {
     const hand =
       side ?? (this.counter % 2 === 0 ? 1 : 0)
     if (side === undefined) this.counter += 1
     this.hands[hand] = { until: now + PRESS_SECONDS, key }
+    if (opts.squash !== false) {
+      // 快速连打时衰减：否则每秒 10 键的冲量会叠成"一直蹲着"，看不出每键的回弹
+      const gain = this.squash.value > PHYSICS.squash.repeatAt ? PHYSICS.squash.repeatGain : 1
+      this.squash.impulse(PHYSICS.squash.impulse * gain)
+    }
+  }
+
+  /**
+   * 落地冲击（挂件侧拖拽落地时调用）。
+   * @param {number} speed 撞击速度，px/s；1200 视为满力，低于 380 只给 `landFloor`
+   */
+  land(speed) {
+    const s = Math.max(
+      PHYSICS.landFloor,
+      Math.min(PHYSICS.landMax, (speed || 0) / PHYSICS.landFull),
+    )
+    this.squash.impulse(PHYSICS.squash.impulse * s)
   }
 
   /**
@@ -2096,6 +2266,7 @@ class PetAnimator {
     this._trackHead(p, ctx, s, now, dt)
     if (p.sit > 0.001) this._typing(p, ctx, s, now, dt)
     else this._resetTyping()
+    this._physics(p, s, dt)
     // 状态专属动画（thinking 挠头 / waiting 跳两下 / done 举手后鼓掌）。
     const state = ctx.state || null
     if (state !== this.state) {
@@ -2124,6 +2295,24 @@ class PetAnimator {
     return !!(this.gestures.active || this.gestures.returnFrom)
   }
 
+  /** 物理是否还在动：任一弹簧没收敛就要 60fps，收敛后立刻回落到 idle 档。 */
+  get physicsBusy() {
+    return !(this.squash.settled && this.headYaw.settled && this.headPitch.settled)
+  }
+
+  /** 压缩通道：弹簧目标恒为 0，全靠 `press()` / `land()` 给初速度推动。 */
+  _physics(p, s, dt) {
+    if (s.physics === false) {
+      this.squash.reset(0)
+      p.squash = 0
+      return
+    }
+    const v = this.squash.step(0, dt)
+    // 坐姿门：sit 0.25→0.6 淡入。站着打字不给压 —— 那看着像被踩了一脚，不像敲键盘。
+    const gate = clamp01((p.sit - 0.25) / 0.35)
+    p.squash = Math.max(-0.45, Math.min(1, v)) * gate
+  }
+
   /** 呼吸：指数逼近的权重 + 0.10 单位的上下起伏 + 头/臂的细微跟随。 */
   _breath(p, s, now, dt) {
     const want = s.breath ? 1 : 0
@@ -2149,22 +2338,41 @@ class PetAnimator {
    *
    *  跟随是**有条件的**：只有 `idle` 且没有待机手势时才发生（plan.md §6.3 里
    *  thinking 的「弱跟随」也不要——状态姿态要稳定可辨）。进入手势或别的状态时
-   *  用 `trackW` 把角度平滑收回到中立，手势 / 状态结束后再平滑恢复，
-   *  所以不是「一进手势就瞬跳回正」。 */
+   *  角度平滑收回中立，手势 / 状态结束后再恢复。
+   *
+   *  `physics` 开：角度走阻尼弹簧（ζ=0.62、ω≈22.8 rad/s），快速甩头后停手会有约 2°
+   *  过冲再回正 —— 这就是「微小的转头惯性」。`physics` 关：退回 P1 的 `trackW` 指数平滑。
+   *  **两者互斥不叠加**：v1 把弹簧套在 trackW 之后，结果只是"更慢"而不是"有惯性"。 */
   _trackHead(p, ctx, s, now, dt) {
     const d = Math.max(dt || 0, 0)
+    const phys = s.physics !== false
     // 光标不在画布上：直接回中立（这条不需要过渡，否则指针一离开就残留偏角）
-    if (!ctx.cursor) { this.trackW = 0; return }
+    if (!ctx.cursor) {
+      this.trackW = 0
+      this.headYaw.reset(0)
+      this.headPitch.reset(0)
+      return
+    }
     // ctx.state 缺省时按 idle 处理（老调用点不传状态，语义上就是"默认状态"）
     const idle = ctx.state == null || ctx.state === 'idle'
     const want = (s.track && idle && !this.gestureBusy) ? 1 : 0
-    this.trackW += (want - this.trackW) * (1 - Math.exp(-d / 0.12))
-    if (this.trackW < 1e-3) this.trackW = 0
-    if (this.trackW === 0) return
+    if (phys) {
+      // want 当开关用，平滑全交给弹簧；收到中立且已收敛时彻底撒手，保证与 P1 逐位同源
+      this.trackW = want
+      if (want === 0 && this.headYaw.settled && this.headPitch.settled) {
+        this.headYaw.reset(0)
+        this.headPitch.reset(0)
+        return
+      }
+    } else {
+      this.trackW += (want - this.trackW) * (1 - Math.exp(-d / 0.12))
+      if (this.trackW < 1e-3) this.trackW = 0
+      if (this.trackW === 0) return
+    }
 
     const W = ctx.width
     const H = ctx.height
-    // 光标离开画布时按画面中上区域算目标，保证 trackW 衰减期间角度是「收回中立」而不是乱指
+    // 光标离开画布时按画面中上区域算目标，保证权重衰减期间角度是「收回中立」而不是乱指
     const cur = ctx.cursor || { x: W / 2, y: H * 0.36 }
     const neck = transformPoint(torsoSpace(p), [0, 12, 0])
     const ahead = Q.rotate(VIEW, [0, 3, 0])
@@ -2182,9 +2390,11 @@ class PetAnimator {
       -s.rangeY * DEG,
       s.rangeY * DEG,
     )
-    // 权重乘在角度上：trackW=0 时目标是严格中立，与状态姿态的 head_rotation 一致
-    const horizontal = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
-    const vertical = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
+    // 权重乘在目标角上：want=0 时目标是严格中立，与状态姿态的 head_rotation 一致
+    const wantH = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
+    const wantV = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
+    const horizontal = phys ? this.headYaw.step(wantH, d) : wantH
+    const vertical = phys ? this.headPitch.step(wantV, d) : wantV
 
     const desired = Q.multiply(
       Q.multiply(
@@ -2308,7 +2518,7 @@ class PetAnimator {
   }
 }
 
-return { BLINK_RATE, blinkClosure, DEFAULT_ANIM, PRESS_SECONDS, PRESS_TAU_IN, PRESS_TAU_OUT, PetAnimator }
+return { BLINK_RATE, blinkClosure, DEFAULT_ANIM, PHYSICS, PRESS_SECONDS, PRESS_TAU_IN, PRESS_TAU_OUT, PetAnimator }
 })()
 var EFFECTS = (function () {
 // 音符粒子：只在检测到**后台有音频在播放**时出现。
@@ -2787,6 +2997,7 @@ return {
   letters: LETTERS,
   gestures: GESTURES,
   state: PET_STATE,
+  spring: SPRING,
   anim: PET_ANIM,
   effects: EFFECTS,
   decorations: DECORATIONS,
@@ -2822,6 +3033,19 @@ return {
   var H = 416
   var STATE_POLL_MS = 1000
   var IDLE_FRAME_MS = 33
+
+  // ---------------------------------------------------------------- 物理（P2-a v2）
+  //
+  // 三个效果（2026-11-17 用户定）：① 打字压缩回弹 ② 拖拽落地回弹 ③ 转头惯性。
+  // ①②的形变都走 pose.squash，③在 pet-anim 内部；这里只管「落地」这一段：
+  // 挂件位置是 DOM 的 left/top，所以落地是像素空间的重力积分，不是模型空间。
+  var FALL_GRAVITY = 2600 // px/s²，屏幕上看着像真掉下来
+  var FALL_RESTITUTION = 0.34 // 每次触底反弹保留的速度
+  var FALL_MIN_V = 70 // 低于这个速度就停住（再弹就是肉眼看不见的抖）
+  var FALL_MAX_BOUNCE = 2
+  var FALL_FLOOR_GAP = 14 // 与 CSS 的 bottom:14px 对齐
+  // ?physics=off 可在真机上做 A/B：关掉后动效退回 P1（转头无惯性、不压缩）
+  var animSettings = { physics: !/[?&]physics=off\b/.test(location.search) }
 
   var LS = {
     pos: 'dshmp-pos',
@@ -2872,6 +3096,10 @@ return {
   var pollTick = 0
   var toastTimer = 0
   var drag = null
+  /** 拖拽松手后的自由落体（像素空间）：{ y, v, floor, bounces }。 */
+  var fall = null
+  /** onDown 取消掉的自由落体：只点不拖时要在 pointerup 里接着掉。 */
+  var fallResume = null
   /** 用户打字的「仍在敲」窗口（ms）：宿主报 idle 时用它把状态临时扳成 working。 */
   var paintError = ''
   var painted = 0
@@ -3514,6 +3742,8 @@ return {
     if (eng.notes.active || eng.status.active) return 2
     if (eng.letters.active) return 2
     if (eng.anim.gestureBusy) return 2
+    // 物理：压缩回弹 / 转头惯性 / 自由落体都要 60fps，收敛后自然回落（不靠 settled 长期拉高）
+    if (fall || eng.anim.physicsBusy) return 2
     // 阈值故意留宽：blinkClosure 的尾巴很长，eyelid 几乎总是 0.999x，
     // 用 0.999 判断等于「永远 60fps」。0.95 覆盖真正看得见闭合的那一段。
     if (eng.anim.eyelid < 0.95) return 2
@@ -3552,11 +3782,19 @@ return {
       var nowSec = nowMs / 1000
       var dt = eng.lastMs ? Math.min(0.05, (nowMs - eng.lastMs) / 1000) : 0.016
       eng.lastMs = nowMs
+      if (fall) stepFall(dt)
       eng.machine.tick(nowMs)
       typingMachine(nowMs, nowSec)
       var pose = eng.anim.update(
         eng.machine.pose(nowMs),
-        { width: W, height: H, cursor: cursor, armWidth: eng.armWidth, state: eng.machine.state },
+        {
+          width: W,
+          height: H,
+          cursor: cursor,
+          armWidth: eng.armWidth,
+          state: eng.machine.state,
+          settings: animSettings,
+        },
         nowSec,
         dt
       )
@@ -3596,7 +3834,8 @@ return {
     }
     if (hostState === 'working') {
       if (nowSec - lastRealPress > 1.2 && nowSec >= nextAutoPress) {
-        eng.anim.press(nowSec)
+        // 自动敲击不带压缩：用户 2026-11-17 明确「效果不应用于自动打字动画」
+        eng.anim.press(nowSec, null, undefined, { squash: false })
         nextAutoPress = nowSec + 0.13 + Math.random() * 0.11
       }
       return
@@ -3744,6 +3983,7 @@ return {
         loadAccount()
         return
       } else if (k === 'reset') {
+        fall = null
         opts.x = -1
         opts.y = -1
         root.style.left = ''
@@ -3773,6 +4013,66 @@ return {
     return false
   }
 
+  // ---------------------------------------------------------------- 落地回弹
+
+  /** 地板位置：与 CSS `bottom:14px` 对齐（拖动后 root 改用 top 定位）。 */
+  function floorTop() {
+    return Math.max(0, window.innerHeight - root.offsetHeight - FALL_FLOOR_GAP)
+  }
+
+  /** 松手 → 自由落体到地板。本来就在地上就给一次轻冲击（像把东西放稳）。 */
+  function startFall(fromTop) {
+    var fl = floorTop()
+    if (fromTop >= fl - 1) {
+      // 本来就在地上：贴齐地板 + 一次轻冲击（像把东西放稳），位置立刻落盘
+      root.style.top = Math.round(fl) + 'px'
+      hitGround(380)
+      endFall()
+      return
+    }
+    fall = { y: fromTop, v: 0, floor: fl, bounces: 0 }
+    root.style.bottom = 'auto'
+    root.style.right = 'auto'
+    root.style.top = Math.round(fromTop) + 'px'
+    scheduleFrame()
+  }
+
+  function hitGround(speed) {
+    // 冲击强度交给动效层换算成 squash 初速度，避免两处各写一套幅度
+    if (eng && eng.anim && eng.anim.land) eng.anim.land(speed)
+  }
+
+  function stepFall(dt) {
+    var step = Math.min(Math.max(dt, 0), 0.032) // 掉帧后不要一步穿地
+    fall.v += FALL_GRAVITY * step
+    fall.y += fall.v * step
+    if (fall.y >= fall.floor) {
+      var impact = fall.v
+      fall.y = fall.floor
+      if (impact > FALL_MIN_V && fall.bounces < FALL_MAX_BOUNCE) {
+        fall.bounces += 1
+        fall.v = -impact * FALL_RESTITUTION
+        hitGround(impact)
+      } else {
+        root.style.top = Math.round(fall.y) + 'px'
+        endFall()
+        return
+      }
+    }
+    root.style.top = Math.round(fall.y) + 'px'
+  }
+
+  function endFall() {
+    fall = null
+    var r = root.getBoundingClientRect()
+    var x = Math.round(r.left)
+    var y = Math.round(r.top)
+    // opts 也要同步：applyOpts()（改缩放等）会拿 opts.x/y 重设位置，只写 localStorage 会被它拽回去
+    opts.x = x
+    opts.y = y
+    set(LS.pos, x + ',' + y)
+  }
+
   function onDown(e) {
     if (e.button !== 0) return
     // 菜单在画布上层，但本监听是**捕获阶段**注册在 root 上的，会先于菜单自己的 handler 执行；
@@ -3783,6 +4083,10 @@ return {
     if (!h || !h.hit) return // 透明区不拦，点击照常落到页面
     e.preventDefault()
     e.stopPropagation()
+    // 抓住正在下落的挂件：立即取消自由落体（不然它会边被拖边往下掉）
+    // 但只点一下不拖时要恢复下落，否则挂件会停在半空
+    fallResume = fall
+    fall = null
     var r = root.getBoundingClientRect()
     drag = { dx: e.clientX - r.left, dy: e.clientY - r.top, moved: false }
     root.className = root.className + ' is-drag'
@@ -3864,6 +4168,7 @@ return {
         drag = null
         root.className = root.className.replace(' is-drag', '')
         if (moved) {
+          fallResume = null
           var r = root.getBoundingClientRect()
           // 吸附：靠哪边就贴到哪边（左右 12px 内）
           if (r.left < 12 || r.right > window.innerWidth - 12) {
@@ -3872,9 +4177,16 @@ return {
             root.style.right = 'auto'
           }
           if (r.top < 12) root.style.top = '12px'
-          if (r.bottom > window.innerHeight - 12) root.style.top = window.innerHeight - r.height - 12 + 'px'
+          // 松手点是自由落体的起点：随后由 stepFall 积到地板并回弹（P2-a v2）
           var fin = root.getBoundingClientRect()
-          set(LS.pos, Math.round(fin.left) + ',' + Math.round(fin.top))
+          var top = Math.min(Math.max(0, fin.top), floorTop())
+          root.style.top = Math.round(top) + 'px'
+          startFall(top)
+          scheduleFrame()
+        } else if (fallResume) {
+          // 只是点了一下没拖：从当前高度接着掉，别把挂件留在半空
+          fallResume = null
+          startFall(root.getBoundingClientRect().top)
           scheduleFrame()
         }
       },
@@ -3889,7 +4201,8 @@ return {
         try {
           letterStat.keys += 1
           var nowMs = performance.now()
-          eng.anim.press(nowMs / 1000)
+          // 真人按键：带压缩回弹（P2-a v2）
+          eng.anim.press(nowMs / 1000, null, undefined, { squash: true })
           if (eng.anim.gestureInput) eng.anim.gestureInput(nowMs / 1000)
           lastRealPress = nowMs / 1000
           typingUntil = nowMs + 2000
@@ -3905,6 +4218,7 @@ return {
     )
 
     window.addEventListener('resize', function () {
+      if (fall) fall.floor = floorTop()
       if (opts.x >= 0 && opts.y >= 0) {
         var r = root.getBoundingClientRect()
         if (r.right > window.innerWidth || r.bottom > window.innerHeight) {
@@ -3940,6 +4254,14 @@ return {
         },
         eyelid: eng.anim.eyelid,
         presses: eng.anim.counter,
+        // P2-a v2：物理探针 —— 真机上「看不出来」时用它区分「没生效」和「幅度太小」
+        physics: {
+          enabled: animSettings.physics !== false,
+          squash: eng.anim.squash.value,
+          squashBusy: !eng.anim.squash.settled,
+          yaw: eng.anim.headYaw.value,
+          falling: !!fall,
+        },
         deco: opts.deco,
         scale: opts.scale,
         flip: opts.flip,

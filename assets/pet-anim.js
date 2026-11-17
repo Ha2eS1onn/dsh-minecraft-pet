@@ -7,6 +7,7 @@
 import { project, transformPoint } from './skin-render.js'
 import { torsoSpace, bodySpace } from './skin-model.js'
 import { GestureScheduler } from './gestures.js'
+import { Spring } from './spring.js'
 import * as Q from './quat.js'
 
 const DEG = Math.PI / 180
@@ -58,6 +59,37 @@ export const DEFAULT_ANIM = {
   sensY: 1,
   rangeX: 45,
   rangeY: 30,
+  /** P2-a v2 物理：打字压缩回弹 / 落地回弹 / 转头惯性。
+   *  关掉必须与 P1 逐像素一致（转头退回 trackW 指数平滑、squash 恒为 0）。 */
+  physics: true,
+}
+
+/**
+ * 物理参数表（P2-a v2，2026-11-17 用户定效果、数值先这样，后续可微调）。
+ *
+ * 三条都是从「看得见」反推的（`node tools/bench-physics.mjs` 有完整表），
+ * 画布 352×416、8 px/模型单位、站立 32 单位高：
+ * - squash: 单次冲量峰值 0.31 ⇒ 头顶下沉 **17.6 px**、约 300 ms 收敛、回弹时拉长 5~6 px
+ * - squash 连打: 90 ms 一个键时靠 `repeatGain` 衰减，峰值不再累加（17.6 px），
+ *   键间谷值 7 px ⇒ 每键都有一次可见的压缩-回弹，而不是一直蹲着
+ * - head:  30° 阶跃过冲约 3°、150 ms 到位、320 ms 稳定；再大就成了「黏」
+ * - 落地在挂件侧用像素重力积分，这里只把冲击速度换算成 squash 冲量
+ */
+export const PHYSICS = {
+  squash: {
+    k: 360,
+    zeta: 0.42,
+    impulse: 13,
+    eps: 0.02,
+    /** 已经压着的时候再加冲量只给 40%，避免快速连打叠成持续下蹲。 */
+    repeatAt: 0.2,
+    repeatGain: 0.4,
+  },
+  head: { k: 520, zeta: 0.58, eps: 0.004 },
+  /** 落地冲击归一化：1200 px/s 视为满力，低于 380 只给三成，上限 1.2 倍。 */
+  landFull: 1200,
+  landFloor: 0.3,
+  landMax: 1.2,
 }
 
 /** 一次按键把该手压在键位上多久。MDP 是 0.15s，但那在快速打字（每秒 6~8 键）时
@@ -100,6 +132,15 @@ export class PetAnimator {
     this.handX = [4.2, -4.2]
     /** 待机手势调度器（M3.5）。 */
     this.gestures = new GestureScheduler()
+    /** 压缩弹簧（P2-a v2）：打字与落地共用一个通道，目标恒为 0，全靠 impulse 推动。 */
+    this.squash = new Spring({
+      k: PHYSICS.squash.k,
+      zeta: PHYSICS.squash.zeta,
+      eps: PHYSICS.squash.eps,
+    })
+    /** 转头惯性（P2-a v2）：水平/垂直各一根，目标角走弹簧而不是瞬时赋值。 */
+    this.headYaw = new Spring({ k: PHYSICS.head.k, zeta: PHYSICS.head.zeta, eps: PHYSICS.head.eps })
+    this.headPitch = new Spring({ k: PHYSICS.head.k, zeta: PHYSICS.head.zeta, eps: PHYSICS.head.eps })
     /** 当前会话语义状态与它开始的时刻，供状态专属动画算相位。 */
     this.state = null
     this.stateStart = 0
@@ -113,12 +154,31 @@ export class PetAnimator {
    * @param {number} now 秒
    * @param {[number, number]|null} key 键位偏移 [x, y]（y 用于 z 方向），null 即交替模式
    * @param {number} [side] 指定手；不传则按 MDP 的 counter 交替
+   * @param {{squash?: boolean}} [opts] `squash:false` 用于**自动敲击**（AI 干活时的节拍）——
+   *   按用户 2026-11-17 的要求，压缩回弹只跟真人打字走，不然 working 状态会一直抖。
    */
-  press(now, key = null, side) {
+  press(now, key = null, side, opts = {}) {
     const hand =
       side ?? (this.counter % 2 === 0 ? 1 : 0)
     if (side === undefined) this.counter += 1
     this.hands[hand] = { until: now + PRESS_SECONDS, key }
+    if (opts.squash !== false) {
+      // 快速连打时衰减：否则每秒 10 键的冲量会叠成"一直蹲着"，看不出每键的回弹
+      const gain = this.squash.value > PHYSICS.squash.repeatAt ? PHYSICS.squash.repeatGain : 1
+      this.squash.impulse(PHYSICS.squash.impulse * gain)
+    }
+  }
+
+  /**
+   * 落地冲击（挂件侧拖拽落地时调用）。
+   * @param {number} speed 撞击速度，px/s；1200 视为满力，低于 380 只给 `landFloor`
+   */
+  land(speed) {
+    const s = Math.max(
+      PHYSICS.landFloor,
+      Math.min(PHYSICS.landMax, (speed || 0) / PHYSICS.landFull),
+    )
+    this.squash.impulse(PHYSICS.squash.impulse * s)
   }
 
   /**
@@ -143,6 +203,7 @@ export class PetAnimator {
     this._trackHead(p, ctx, s, now, dt)
     if (p.sit > 0.001) this._typing(p, ctx, s, now, dt)
     else this._resetTyping()
+    this._physics(p, s, dt)
     // 状态专属动画（thinking 挠头 / waiting 跳两下 / done 举手后鼓掌）。
     const state = ctx.state || null
     if (state !== this.state) {
@@ -171,6 +232,24 @@ export class PetAnimator {
     return !!(this.gestures.active || this.gestures.returnFrom)
   }
 
+  /** 物理是否还在动：任一弹簧没收敛就要 60fps，收敛后立刻回落到 idle 档。 */
+  get physicsBusy() {
+    return !(this.squash.settled && this.headYaw.settled && this.headPitch.settled)
+  }
+
+  /** 压缩通道：弹簧目标恒为 0，全靠 `press()` / `land()` 给初速度推动。 */
+  _physics(p, s, dt) {
+    if (s.physics === false) {
+      this.squash.reset(0)
+      p.squash = 0
+      return
+    }
+    const v = this.squash.step(0, dt)
+    // 坐姿门：sit 0.25→0.6 淡入。站着打字不给压 —— 那看着像被踩了一脚，不像敲键盘。
+    const gate = clamp01((p.sit - 0.25) / 0.35)
+    p.squash = Math.max(-0.45, Math.min(1, v)) * gate
+  }
+
   /** 呼吸：指数逼近的权重 + 0.10 单位的上下起伏 + 头/臂的细微跟随。 */
   _breath(p, s, now, dt) {
     const want = s.breath ? 1 : 0
@@ -196,22 +275,41 @@ export class PetAnimator {
    *
    *  跟随是**有条件的**：只有 `idle` 且没有待机手势时才发生（plan.md §6.3 里
    *  thinking 的「弱跟随」也不要——状态姿态要稳定可辨）。进入手势或别的状态时
-   *  用 `trackW` 把角度平滑收回到中立，手势 / 状态结束后再平滑恢复，
-   *  所以不是「一进手势就瞬跳回正」。 */
+   *  角度平滑收回中立，手势 / 状态结束后再恢复。
+   *
+   *  `physics` 开：角度走阻尼弹簧（ζ=0.62、ω≈22.8 rad/s），快速甩头后停手会有约 2°
+   *  过冲再回正 —— 这就是「微小的转头惯性」。`physics` 关：退回 P1 的 `trackW` 指数平滑。
+   *  **两者互斥不叠加**：v1 把弹簧套在 trackW 之后，结果只是"更慢"而不是"有惯性"。 */
   _trackHead(p, ctx, s, now, dt) {
     const d = Math.max(dt || 0, 0)
+    const phys = s.physics !== false
     // 光标不在画布上：直接回中立（这条不需要过渡，否则指针一离开就残留偏角）
-    if (!ctx.cursor) { this.trackW = 0; return }
+    if (!ctx.cursor) {
+      this.trackW = 0
+      this.headYaw.reset(0)
+      this.headPitch.reset(0)
+      return
+    }
     // ctx.state 缺省时按 idle 处理（老调用点不传状态，语义上就是"默认状态"）
     const idle = ctx.state == null || ctx.state === 'idle'
     const want = (s.track && idle && !this.gestureBusy) ? 1 : 0
-    this.trackW += (want - this.trackW) * (1 - Math.exp(-d / 0.12))
-    if (this.trackW < 1e-3) this.trackW = 0
-    if (this.trackW === 0) return
+    if (phys) {
+      // want 当开关用，平滑全交给弹簧；收到中立且已收敛时彻底撒手，保证与 P1 逐位同源
+      this.trackW = want
+      if (want === 0 && this.headYaw.settled && this.headPitch.settled) {
+        this.headYaw.reset(0)
+        this.headPitch.reset(0)
+        return
+      }
+    } else {
+      this.trackW += (want - this.trackW) * (1 - Math.exp(-d / 0.12))
+      if (this.trackW < 1e-3) this.trackW = 0
+      if (this.trackW === 0) return
+    }
 
     const W = ctx.width
     const H = ctx.height
-    // 光标离开画布时按画面中上区域算目标，保证 trackW 衰减期间角度是「收回中立」而不是乱指
+    // 光标离开画布时按画面中上区域算目标，保证权重衰减期间角度是「收回中立」而不是乱指
     const cur = ctx.cursor || { x: W / 2, y: H * 0.36 }
     const neck = transformPoint(torsoSpace(p), [0, 12, 0])
     const ahead = Q.rotate(VIEW, [0, 3, 0])
@@ -229,9 +327,11 @@ export class PetAnimator {
       -s.rangeY * DEG,
       s.rangeY * DEG,
     )
-    // 权重乘在角度上：trackW=0 时目标是严格中立，与状态姿态的 head_rotation 一致
-    const horizontal = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
-    const vertical = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
+    // 权重乘在目标角上：want=0 时目标是严格中立，与状态姿态的 head_rotation 一致
+    const wantH = clamp(x, -Math.PI / 2, Math.PI / 2) * this.trackW
+    const wantV = clamp(y, -85 * DEG, 85 * DEG) * this.trackW
+    const horizontal = phys ? this.headYaw.step(wantH, d) : wantH
+    const vertical = phys ? this.headPitch.step(wantV, d) : wantV
 
     const desired = Q.multiply(
       Q.multiply(

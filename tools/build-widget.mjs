@@ -33,6 +33,7 @@ const MODULES = [
   { file: 'letters.js', varName: 'LETTERS' },
   { file: 'gestures.js', varName: 'GESTURES' },
   { file: 'pet-state.js', varName: 'PET_STATE' },
+  { file: 'spring.js', varName: 'SPRING' },
   { file: 'pet-anim.js', varName: 'PET_ANIM' },
   { file: 'effects.js', varName: 'EFFECTS' },
   { file: 'decorations.js', varName: 'DECORATIONS' },
@@ -109,6 +110,7 @@ function buildBundle() {
   parts.push('  letters: LETTERS,')
   parts.push('  gestures: GESTURES,')
   parts.push('  state: PET_STATE,')
+  parts.push('  spring: SPRING,')
   parts.push('  anim: PET_ANIM,')
   parts.push('  effects: EFFECTS,')
   parts.push('  decorations: DECORATIONS,')

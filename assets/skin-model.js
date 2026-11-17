@@ -26,6 +26,11 @@ const KEYBOARD_COLOR = [0x83, 0x87, 0x8a]
 /** 键帽比键盘底色暗 22%（MDP `key_gray = gray * 0.78`）。 */
 const KEYCAP_COLOR = [102, 105, 108]
 
+/** 压缩形变（果冻）：squash=1 时高度压到 78%、横向鼓到 113%。
+ *  取值依据：站立 32 单位高、8 px/单位，squash 峰值约 0.42 ⇒ 头顶下沉约 3 单位 ≈ 24 px。 */
+const SQUASH_Y = 0.22
+const SQUASH_XZ = 0.13
+
 /** 静止姿态：所有字段为 0/identity，渲染结果必须与 M0 基线逐像素一致。 */
 export function defaultPose() {
   return {
@@ -34,6 +39,8 @@ export function defaultPose() {
     sink: 0,
     /** 模型空间整体平移（伸懒腰的身体抖动），[x, y, z] 或 null。 */
     shake: null,
+    /** 压缩量（P2-a v2）：1 = 压到最扁，负值 = 拉长。以脚底 y=0 为支点做非等比缩放。 */
+    squash: 0,
     yaw: 0,
     pitch: 0,
     body_yaw: 0,
@@ -89,6 +96,8 @@ function bodySpace(p) {
 
 /** 供动效层复用的空间矩阵（M3 的头部跟随与打字需要求肩点/脖子位置）。 */
 export { baseBody, torsoSpace, bodySpace }
+/** 压缩形变系数：`tools/bench-physics.mjs` 用它把 squash 换算成像素位移。 */
+export const SQUASH_SHAPE = { y: SQUASH_Y, xz: SQUASH_XZ, height: 32 }
 
 /**
  * 骨架构建。
@@ -230,6 +239,19 @@ export function buildParts(
         pos: local.map((c) => transformPoint(headTransform, [c[0], c[1], c[2]])),
         uv: local.map((c) => [c[3], c[4]]),
       })
+    }
+  }
+
+  // 压缩形变（P2-a v2，打字与落地用）：以**脚底 y=0** 为支点的非等比缩放，
+  // 高度压扁、横向鼓起，读起来才有「果冻」的体积感；只平移不改轮廓的写法 v1 已经证伪。
+  // 放在 shake 之前：抖动是绝对位移，不该被压缩量再缩放一次。
+  // 键盘在下面才 push，所以不吃压缩 —— 它是场景物件，不是角色的肉。
+  if (p.squash) {
+    const sq = Math.max(-0.45, Math.min(1, p.squash))
+    const m = scale(1 + SQUASH_XZ * sq, 1 - SQUASH_Y * sq, 1 + SQUASH_XZ * sq)
+    for (const part of parts) {
+      if (part.kind === 'quad') part.pos = part.pos.map((v) => transformPoint(m, v))
+      else part.transform = multiply(m, part.transform)
     }
   }
 

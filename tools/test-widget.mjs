@@ -84,7 +84,6 @@ if (PET) {
   check('动效暴露 counter / gestureBusy / gestureInput（挂件壳用到）', typeof a.counter === 'number' && 'gestureBusy' in a && typeof a.gestureInput === 'function')
 
   // P2 接线中的三个模块必须真的在产物里（build-widget 的 MODULES 漏一个就会在这里炸）。
-  // spring 已按用户要求回退，故意不内联。
   for (const [mod, fns] of [
     ['geo', ['parseGeo', 'geoParts', 'checkTextureSize']],
     ['typeLetters', ['buildGlyphs', 'keyLabelFromEvent', 'keyPositionFromCode', 'canvasRasterizer']],
@@ -92,8 +91,32 @@ if (PET) {
   ]) {
     check(`产物暴露 ${mod} 模块`, !!PET[mod] && fns.every((f) => typeof PET[mod][f] === 'function'), fns.filter((f) => !PET[mod] || typeof PET[mod][f] !== 'function').join(','))
   }
-  check('物理已回退：产物里不再有 spring / physicsBusy', !PET.spring && bundleSrc.indexOf('class Spring') < 0 && bundleSrc.indexOf('physicsBusy') < 0)
-  check('动效回到 P1：实例上没有 physicsBusy / physics', !('physicsBusy' in a) && !('physics' in a))
+  // P2-a v2（2026-11-17 重做）：弹簧重新内联，动效暴露压缩 / 转头 / 落地三个入口
+  check('物理 v2 已接线：产物内联 spring，动效暴露 squash / headYaw / land / physicsBusy', !!PET.spring && typeof PET.spring.Spring === 'function' && bundleSrc.indexOf('class Spring') >= 0 && typeof a.squash?.value === 'number' && typeof a.headYaw?.value === 'number' && typeof a.land === 'function' && 'physicsBusy' in a)
+  check('physics=off：压缩恒为 0 且没有残留物理（与 P1 一致）', (() => {
+    const off = new PET.anim.PetAnimator(0)
+    off.press(0.05)
+    const pose = { ...PET.model.defaultPose(), sit: 1 }
+    const out = off.update(pose, { width: 352, height: 416, settings: { physics: false } }, 0.05, 0.016)
+    return out.squash === 0 && off.physicsBusy === false
+  })())
+  check('physics=on：坐姿按键压缩、站姿不压', (() => {
+    const on = new PET.anim.PetAnimator(0)
+    const sitting = { ...PET.model.defaultPose(), sit: 1 }
+    on.press(0.05)
+    let peak = 0
+    for (let i = 0; i < 6; i++) {
+      const p = on.update(sitting, { width: 352, height: 416 }, 0.05 + i / 60, 1 / 60)
+      peak = Math.max(peak, p.squash || 0)
+    }
+    const standing = on.update({ ...PET.model.defaultPose() }, { width: 352, height: 416 }, 2, 1 / 60)
+    return peak > 0.15 && standing.squash === 0
+  })())
+  check('自动敲击不带压缩（用户要求：果冻只跟真人打字）', (() => {
+    const auto = new PET.anim.PetAnimator(0)
+    auto.press(0.05, null, undefined, { squash: false })
+    return auto.squash.value === 0 && auto.counter === 1
+  })())
   check('产物内嵌小鸭贴图与 geo 模型', String(PET.assets.duck || '').indexOf('data:image/png;base64,') === 0 && String(PET.assets.duckGeo || '').indexOf('minecraft:geometry') > 0)
   const duck = PET.geo.parseGeo(PET.assets.duckGeo)
   check('内嵌 geo 能解析出盒子', duck.parts.length >= 6, `${duck.parts.length} parts`)
@@ -142,7 +165,12 @@ check('只在坐姿显示（sit > 0.4）', shell.indexOf('lastPose.sit > 0.4') >
 check('字模走 canvasRasterizer 且缓存', shell.indexOf('T.canvasRasterizer(document)') >= 0 && shell.indexOf('if (glyphSet) return glyphSet') >= 0)
 check('绘制顺序：浮现字在音符之前', shell.indexOf('eng.letters.draw(') < shell.indexOf('eng.notes.draw(') && shell.indexOf('eng.letters.draw(') > 0)
 check('没有字时不造字模（首帧零开销）', shell.indexOf('if (eng.letters.active) eng.letters.draw(') >= 0)
-check('帧需求：有字时 60fps，且不再有物理分支', shell.indexOf('if (eng.letters.active) return 2') >= 0 && shell.indexOf('physicsBusy') < 0)
+check('帧需求：有字 / 物理在动 / 自由落体时都上 60fps', shell.indexOf('if (eng.letters.active) return 2') >= 0 && shell.indexOf('if (fall || eng.anim.physicsBusy) return 2') >= 0)
+// P2-a v2 接线：真人按键带压缩、自动敲击不带、落地走像素积分并回馈 squash
+check('真人 keydown 带压缩、自动敲击显式关闭', shell.indexOf('eng.anim.press(nowMs / 1000, null, undefined, { squash: true })') >= 0 && shell.indexOf('{ squash: false }') >= 0)
+check('拖拽松手进入自由落体，落地触发 squash', shell.indexOf('function stepFall') >= 0 && shell.indexOf('startFall(top)') >= 0 && shell.indexOf('eng.anim.land(speed)') >= 0)
+check('物理探针暴露 squash / falling / enabled', shell.indexOf('squashBusy: !eng.anim.squash.settled') >= 0 && shell.indexOf('falling: !!fall') >= 0)
+check('physics=off 可做真机 A/B', shell.indexOf("physics: !/[?&]physics=off\\b/.test(location.search)") >= 0)
 check('探针暴露 letters / letterStat', shell.indexOf('letters: eng.letters.count') >= 0 && shell.indexOf('letterStat: {') >= 0)
 check('披风开关持久化用 dshmp-cape', shell.indexOf("cape: 'dshmp-cape'") >= 0)
 check('localStorage 统一用 dshmp- 前缀', (src.match(/'dshmp-/g) || []).length >= 5)
