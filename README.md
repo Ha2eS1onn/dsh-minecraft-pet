@@ -15,7 +15,7 @@ DSH（DeepSeek Harness）界面右下角的 **Minecraft 方块小人挂件**。
 - **敲字浮现字**：坐姿打字时，字符从对应按键上方升起，糖果色带阴影，0.8 秒淡出；中文输入法只显示键名。按规格**只在坐姿出现**（宿主 `idle` 时打字会切到坐姿；宿主正在 `thinking` / `waiting` 时不抢状态，也就不会出字）
   - 没出字时读 `window.__dshPetState().letterStat`：`keys` 有没有涨、`noSit` / `noLabel` / `noPos` 哪个在涨、`glyphs` 是否为 0、`error` 有没有内容，一次即可定位
 - **Bedrock 装饰**：可挂 `.geo.json` 骨骼盒子模型（内置一只自造小鸭），跟随头部旋转
-- **物理模拟**：第一版效果不达标已回退到 P1，重做设计见 [`docs/physics-redesign.md`](docs/physics-redesign.md)
+- **物理模拟**：第一版效果不达标（落地回弹峰值仅 2.8 px）已回退，当前为无物理的 P1 行为；重做中，设计说明在源码内 `docs/physics-redesign.md`（该目录不入库）
 - **正版披风**：右键菜单 →「正版账号」，输入 Java 版用户名或 UUID，拉取该账号的皮肤、模型类型（classic/slim）与披风；解绑自动还原本地皮肤
 - **余额**：账号余额、今日已用、峰谷时段标记；拿不到数据时显示 `--`，不挡其他功能
 - **每轮消耗**：一轮结束后弹出「本轮 ¥0.00xx · N tok」
@@ -24,12 +24,12 @@ DSH（DeepSeek Harness）界面右下角的 **Minecraft 方块小人挂件**。
 ## 安装
 
 ```bash
-# 从 npm（发布后）
-dsh plugin --profile desktop add dsh-minecraft-pet
-
-# 本地开发（link 安装，改 assets/ 后 Ctrl+F5 生效）
+# 本地目录（link 安装，改 assets/ 后 Ctrl+F5 生效）
 dsh plugin --profile desktop add link:D:/path/to/dsh-minecraft-pet
 ```
+
+> 目前只发 GitHub Release，**npm 上未发布**，所以 `dsh plugin add dsh-minecraft-pet` 不可用。
+> 需要分发包时在本仓库 `npm pack` 出 tgz 自行安装。
 
 宿主代码（`lib/`）改动需要**重启 DSH 客户端**才生效；`assets/` 下的挂件与渲染模块按 mtime 热读，刷新页面即可。
 
@@ -83,7 +83,7 @@ node tools/compare-cape.mjs     # 披风三联对照图 → prototype/m5-cape.pn
 node tools/make-geo-duck.mjs    # 重造内置小鸭的 geo + 贴图
 ```
 
-设计取舍与踩过的坑都在 [`docs/HANDOFF.md`](docs/HANDOFF.md)，施工说明书是 [`docs/plan.md`](docs/plan.md)。
+设计取舍与踩过的坑记在源码内 `docs/HANDOFF.md`，施工说明书是 `docs/plan.md`（`docs/` 只在本机保留，不随仓库分发）。
 
 ## 许可
 
