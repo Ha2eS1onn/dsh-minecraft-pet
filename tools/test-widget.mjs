@@ -177,6 +177,21 @@ check('拖拽松手进入自由落体，落地触发 squash', shell.indexOf('fun
 check('只有底部 15% 吸附带会落地，其它位置原地停住', shell.indexOf('var BOTTOM_BAND = 0.15') >= 0 && shell.indexOf('function inBottomBand') >= 0 && shell.indexOf('if (!inBottomBand(r))') >= 0)
 check('显示裁切框按 CROP 计算（stage 比例 + 画布负偏移 + 宽度补偿）', shell.indexOf('var CROP = { x: 56, y: 2, w: 240, h: 342 }') >= 0 && shell.indexOf('overflow:hidden') >= 0 && shell.indexOf('(W / CROP.w) * 100') >= 0 && shell.indexOf('(CROP.w / W)') >= 0)
 check('底部吸附不再做左右磁吸', shell.indexOf('magnetLeft') < 0)
+// 2026-11-18：位置改存「窗口内相对比例」。原先存绝对像素，全屏↔窗口化后人物相对位置会变
+check('位置存相对比例（0..1），旧版的绝对像素首次布局折算并改写', shell.indexOf('opts.pxPos') >= 0 && shell.indexOf('function migratePos') >= 0 && shell.indexOf("toFixed(4) + ','") >= 0)
+check('resize 重算宽度与气泡（位置由 CSS 百分比自己跟）', shell.indexOf('function relayout') >= 0 && shell.indexOf('root.style.width = widgetWidth()') >= 0 && shell.indexOf('applyBubble()') >= 0)
+// 2026-11-18 第三轮：位置改成「百分比 + 自身比例反向位移」，由布局引擎跟窗口，不写像素
+check('位置用 left/top 百分比 + translate 百分比（不写像素）', shell.indexOf("(rx * 100).toFixed(4) + '%'") >= 0 && shell.indexOf("'translate(' + (-rx * 100).toFixed(4)") >= 0)
+check('拖动/下落期间不覆盖像素定位', shell.indexOf('if (drag || fall) return') >= 0)
+check('探针能看出跑的是哪版定位（posVer）', shell.indexOf("var POS_VER = 'pct-1'") >= 0 && shell.indexOf('posVer: POS_VER') >= 0)
+// 桌面版不一定能开 DevTools：菜单底部直接显示版本，用来确认改动到底加载了没有
+const pkgVer = JSON.parse(fs.readFileSync('package.json', 'utf8')).version
+check('菜单显示版本号，且与 package.json 一致', shell.indexOf("var PET_VER = '" + pkgVer + "'") >= 0 && shell.indexOf('data-ver') >= 0 && shell.indexOf("PET_VER + ' · ' + POS_VER") >= 0, 'package.json=' + pkgVer)
+check('位置换算统一走 posBox / widgetWidth，不散落魔法数', shell.indexOf('function posBox') >= 0 && shell.indexOf('function widgetWidth') >= 0 && shell.indexOf('maxX: Math.max(1, window.innerWidth') >= 0)
+check('探针暴露 pos（比例）与 posPx（像素 / 视口）', shell.indexOf('pos: opts.pos ?') >= 0 && shell.indexOf('posPx: (function ()') >= 0)
+// 2026-11-18 第二轮：系统全屏动画里 resize 会先报旧尺寸或漏报 → tick 里加视口看门狗兜底
+check('帧循环每帧查视口尺寸，变了就重排', shell.indexOf('function checkViewport') >= 0 && shell.indexOf('checkViewport()') >= 0 && shell.indexOf('viewportSeen') >= 0)
+check('视口变过时不折算比例（避免把错值写死）', shell.indexOf('layoutStamp.vw !== window.innerWidth') >= 0 && shell.indexOf('layoutStamp = { vw: window.innerWidth') >= 0)
 check('物理探针暴露 squash / falling / enabled', shell.indexOf('squashBusy: !eng.anim.squash.settled') >= 0 && shell.indexOf('falling: !!fall') >= 0)
 check('physics=off 可做真机 A/B', shell.indexOf("physics: !/[?&]physics=off\\b/.test(location.search)") >= 0)
 check('探针暴露 letters / letterStat', shell.indexOf('letters: eng.letters.count') >= 0 && shell.indexOf('letterStat: {') >= 0)
@@ -235,6 +250,25 @@ check('有自检钩子 __dshPetState', shell.indexOf('window.__dshPetState') >= 
   }
   check('挂件壳里没有「调用了但没定义」的函数', missing.size === 0, [...missing].join(','))
   check('init 分步包了 try/catch（一步失败不会全灭）', code.indexOf('var steps = [injectCss') >= 0)
+
+  // 2026-11-18：自定义设置面板（常规 / 视线与角度 / 其他设置）
+  check('配置用单个 JSON 键 dshmp-cfg', shell.indexOf("cfg: 'dshmp-cfg'") >= 0 && shell.indexOf('function normalizeCfg') >= 0)
+  check('三个 tab 与三个 pane 都在 DOM 里', ['data-tab="general"', 'data-tab="view"', 'data-tab="other"', 'data-pane="general"', 'data-pane="view"', 'data-pane="other"'].every((s) => shell.indexOf(s) >= 0))
+  check('滑块不带 data-row（避免被 closest 当开关点掉）', shell.indexOf("data-cfg=\"' + key + '\"") >= 0 && shell.indexOf("data-pose=\"' + key + '\"") >= 0 && shell.indexOf('class="dshmp-pose-row"') >= 0)
+  check('滑块走 input 事件、色号走 change', shell.indexOf("menuEl.addEventListener('input'") >= 0 && shell.indexOf("menuEl.addEventListener('change'") >= 0)
+  check('面板开关用变量 menuOpen，不再靠 className 子串', shell.indexOf('var menuOpen = false') >= 0 && shell.indexOf("menuEl.className.indexOf('on')") < 0)
+  check('鼠标在面板上时不扭头（但不清 cursor）', shell.indexOf('if (menuOpen && inUi(e.target)) return') >= 0)
+  check('自定义骨架透传给 buildParts 与动效层', shell.indexOf('custom: customAt(pose.sit)') >= 0 && shell.indexOf('customRig: customAt(basePose.sit)') >= 0)
+  check('键盘样式/色号透传', shell.indexOf("keycaps: !cfg || cfg.keyboard.style !== 'simple'") >= 0 && shell.indexOf('keyboardColor: kbSolid') >= 0)
+  check('版本行含配置版本 CFG_VER', shell.indexOf("PET_VER + ' · ' + POS_VER + ' · ' + CFG_VER") >= 0)
+  // 2026-11-18 复验反馈：面板 380×500 会压住小人 → 改成优先放到人物外侧
+  check('面板优先放到人物外侧（右→左→上→下，最后才用光标）', ['var fitR =', 'var fitL =', 'var fitU =', 'var fitD =', 'r.right + gap + mw'].every((s) => shell.indexOf(s) >= 0))
+  check('数值标签走 cfgValue（点路径不会显示 undefined）', shell.indexOf('key.indexOf(\'sens\') === 0 ? cfgValue(key)') >= 0)
+  // 2026-11-18 复验反馈：选「坐姿」要真的切过去并保持，不是临时预览
+  check('姿态选择持久化（poseMode: auto/stand/sit）', shell.indexOf("poseMode: 'auto'") >= 0 && shell.indexOf('function forcedSit()') >= 0 && shell.indexOf('var pv = forcedSit()') >= 0)
+  check('切姿态用 120ms 过渡而不是一帧瞬移', shell.indexOf('forcedSitNow += (pv - forcedSitNow) * (1 - Math.exp(-dt / 0.12))') >= 0)
+  check('姿态写入配置并持久化', shell.indexOf("cfg.poseMode = segVal === 'stand' || segVal === 'sit' ? segVal : 'auto'") >= 0 && shell.indexOf('cfg.poseSet = poseSet') >= 0)
+  check('分段开关用 closest 命中（点边缘也能切）', shell.indexOf("closest('[data-seg]')") >= 0)
 }
 
 console.log(`\n${fail === 0 ? '全部通过' : fail + ' 项失败'}  (${pass} ok / ${fail} fail)`)

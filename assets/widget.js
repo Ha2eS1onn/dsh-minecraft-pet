@@ -797,6 +797,82 @@ function bodySpace(p) {
 }
 
 /** 供动效层复用的空间矩阵（M3 的头部跟随与打字需要求肩点/脖子位置）。 */
+
+/** 自定义姿态的六个部位（顺序与配置对象一致）。 */
+const CUSTOM_ROWS = ['head', 'body', 'leftArm', 'rightArm', 'leftLeg', 'rightLeg']
+
+/** 一行 [x,y,z] 度 → 四元数；全零（或缺省）返回 null，让调用方走「零开销」分支。 */
+function rowQuat(row) {
+  if (!row) return null
+  const x = Number(row[0]) || 0
+  const y = Number(row[1]) || 0
+  const z = Number(row[2]) || 0
+  if (!x && !y && !z) return null
+  return Q.fromDegrees(x, y, z)
+}
+
+/**
+ * 把「站姿/坐姿两套自定义角度」折算成一组可复用的矩阵。
+ *
+ * - 每部位按 `sit` 在站/坐两套之间 slerp，所以进出坐姿是连续过渡，不会硬跳。
+ * - 全零 → 返回 **null**（不是单位矩阵）：`buildParts` 见到 null 时完全跳过乘法，
+ *   静止帧才能与基线逐像素一致（`c2c43ab4`）。
+ * - `rot` 是整体角度：绕 y=15（模型中心）转，与 MDP `model_transform` 一致。
+ *
+ * @param {object} cfg 配置对象（只读 `cfg.pose` 与 `cfg.rot`）
+ * @param {number} sit 0..1 坐姿混合量
+ * @returns {null | {body, head, arms, legs, rot, bodyQ, rotQ}}
+ */
+function customRig(cfg, sit) {
+  if (!cfg || !cfg.pose) return null
+  const stand = cfg.pose.stand || {}
+  const seated = cfg.pose.sit || {}
+  const t = Math.max(0, Math.min(1, Number(sit) || 0))
+  const rig = { body: null, head: null, arms: [null, null], legs: [null, null], rot: null, bodyQ: null, rotQ: null }
+  let any = false
+
+  const blend = (entry) => {
+    const a = rowQuat(stand[entry])
+    const b = rowQuat(seated[entry])
+    if (!a && !b) return null
+    if (!a) return t >= 1 ? b : (t <= 0 ? null : Q.slerp(Q.identity(), b, t))
+    if (!b) return t <= 0 ? a : (t >= 1 ? null : Q.slerp(a, Q.identity(), t))
+    if (t <= 0) return a
+    if (t >= 1) return b
+    return Q.slerp(a, b, t)
+  }
+
+  for (const entry of CUSTOM_ROWS) {
+    const q = blend(entry)
+    if (!q) continue
+    any = true
+    const m = Q.toMatrix(q)
+    if (entry === 'body') { rig.body = m; rig.bodyQ = q }
+    else if (entry === 'head') rig.head = m
+    else if (entry === 'leftArm') rig.arms[0] = m
+    else if (entry === 'rightArm') rig.arms[1] = m
+    else if (entry === 'leftLeg') rig.legs[0] = m
+    else if (entry === 'rightLeg') rig.legs[1] = m
+  }
+
+  const rot = cfg.rot
+  if (rot) {
+    const rx = Number(rot.x) || 0
+    const ry = Number(rot.y) || 0
+    const rz = Number(rot.z) || 0
+    if (rx || ry || rz) {
+      const q = Q.fromDegrees(rx, ry, rz)
+      rig.rotQ = q
+      rig.rot = multiply(multiply(translate(0, 15, 0), Q.toMatrix(q)), translate(0, -15, 0))
+      any = true
+    }
+  }
+  if (!any) return null
+  if (!rig.bodyQ) rig.bodyQ = Q.identity()
+  if (!rig.rotQ) rig.rotQ = Q.identity()
+  return rig
+}
+
 /** 压缩形变系数：`tools/bench-physics.mjs` 用它把 squash 换算成像素位移。 */
 const SQUASH_SHAPE = { y: SQUASH_Y, xz: SQUASH_XZ, height: 32 }
 
@@ -804,17 +880,23 @@ const SQUASH_SHAPE = { y: SQUASH_Y, xz: SQUASH_XZ, height: 32 }
  * 骨架构建。
  * @param {object} pose 见 defaultPose()
  * @param {{legacy?: boolean, eyes?: object}} skin legacy 标记 + 识别格眼睛
- * @param {{outer?: boolean, armWidth?: number, keyboard?: boolean, keycaps?: boolean}} opts
- *   armWidth=3 即 slim；keyboard=false 可关掉坐姿键盘
+ * @param {{outer?: boolean, armWidth?: number, keyboard?: boolean, keycaps?: boolean,
+ *          cape?: object, custom?: object, keyboardColor?: number[]}} opts
+ *   armWidth=3 即 slim；keyboard=false 可关掉坐姿键盘；
+ *   custom 是 `customRig()` 的返回值（null 时不做任何额外乘法，保证基线逐像素不变）；
+ *   keyboardColor 是键盘盒 RGB（null 时用内置常量，键帽自动取 0.78 暗一档）
  */
 function buildParts(
   pose,
   skin,
-  { outer = true, armWidth = 4, keyboard: keyboardOn = true, keycaps = true, cape = null } = {},
+  { outer = true, armWidth = 4, keyboard: keyboardOn = true, keycaps = true, cape = null, custom = null, keyboardColor = null } = {},
 ) {
   const p = pose || defaultPose()
   const legacy = !!skin?.legacy
   const parts = []
+  // 自定义偏移：off 为 null 时**原样返回**，不引入任何多余乘法（否则末位会漂、基线哈希变）
+  const C = custom
+  const mul = (m, off) => (off ? multiply(m, off) : m)
 
   const add = (key, size, uv, transform, mirror = false) => {
     parts.push({ key, size, uv, transform, inflate: 0, mirror })
@@ -825,21 +907,20 @@ function buildParts(
   }
 
   // 躯干
-  add('body', [8, 12, 4], [16, 16], multiply(bodySpace(p), translate(0, 6, 0)))
+  add('body', [8, 12, 4], [16, 16], multiply(mul(bodySpace(p), C && C.body), translate(0, 6, 0)))
 
-  // 头：torso_space · T(0,12,0) · headRot · T(0,4,0)
+  // 头：torso_space · [custom body] · T(0,12,0) · [custom head] · headRot · T(0,4,0)
   const headRot = p.head_rotation ? Q.toMatrix(p.head_rotation) : IDENTITY_MAT
-  const headTransform = multiply(
-    multiply(multiply(torsoSpace(p), translate(0, 12, 0)), headRot),
-    translate(0, 4, 0),
-  )
+  const headBase = mul(mul(torsoSpace(p), C && C.body), translate(0, 12, 0))
+  const headTransform = multiply(multiply(mul(headBase, C && C.head), headRot), translate(0, 4, 0))
   add('head', [8, 8, 8], [0, 0], headTransform)
 
-  // 手臂：torso_space · Ry(body_yaw) · T(肩) · armRot · T(0,-4,0)
+  // 手臂：torso_space · Ry(body_yaw) · [custom body] · T(肩) · armRot · [custom arm] · T(0,-4,0)
   for (const left of [false, true]) {
     const side = left ? 0 : 1
     const sign = left ? 1 : -1
     const armRot = p.arms?.[side] ? Q.toMatrix(p.arms[side]) : IDENTITY_MAT
+    const armBase = mul(mul(torsoSpace(p), Q.toMatrix(Q.rotY(p.body_yaw))), C && C.body)
     add(
       left ? 'leftArm' : 'rightArm',
       [armWidth, 12, 4],
@@ -847,10 +928,10 @@ function buildParts(
       multiply(
         multiply(
           multiply(
-            multiply(torsoSpace(p), Q.toMatrix(Q.rotY(p.body_yaw))),
+            armBase,
             translate(sign * (4 + armWidth / 2) + p.arm_slide, 10 + sign * p.arm_bob, 0),
           ),
-          armRot,
+          mul(armRot, C && C.arms[side]),
         ),
         translate(0, -4, 0),
       ),
@@ -878,7 +959,7 @@ function buildParts(
             multiply(baseBody(p), translate(sign * (2 + 0.25 * p.sit) + p.leg_slide, 0, 0)),
             Q.toMatrix(Q.rotZ(p.leg_roll)),
           ),
-          Q.toMatrix(legQ),
+          mul(Q.toMatrix(legQ), C && C.legs[side]),
         ),
         translate(0, -6, 0),
       ),
@@ -900,7 +981,7 @@ function buildParts(
       size: [10, 16, 1],
       uv: [0, 0],
       transform: multiply(
-        multiply(bodySpace(p), translate(0, 3.6, -2.9)),
+        multiply(mul(bodySpace(p), C && C.body), translate(0, 3.6, -2.9)),
         Q.toMatrix(Q.rotX(0.14)),
       ),
       inflate: 0,
@@ -974,6 +1055,9 @@ function buildParts(
     const SX = 19.6
     const SY = 0.65
     const SZ = 7.8
+    // 自定义色号：键盘用原色，键帽按 MDP 的 0.78 压暗；没设色号时走内置常量（默认画面不变）
+    const kbColor = keyboardColor || KEYBOARD_COLOR
+    const capColor = keyboardColor ? keyboardColor.map((v) => Math.round(v * 0.78)) : KEYCAP_COLOR
     const keyboard = multiply(
       multiply(translate(0, 10.2, 9.4), scale(p.sit, p.sit, p.sit)),
       translate(0, -0.3, 0),
@@ -986,7 +1070,7 @@ function buildParts(
       transform: keyboard,
       inflate: 0,
       mirror: false,
-      solid: KEYBOARD_COLOR,
+      solid: kbColor,
     })
     // 键帽：MDP 在顶面按 3 行 × 5 列判定 `is_key`（render.rs:2162-2174）把键位画暗；
     // 这里做成立体小方块，观感一致且完全复用 drawBox。
@@ -1004,10 +1088,20 @@ function buildParts(
             transform: multiply(keyboard, translate(gx, SY / 2 + 0.03, gz)),
             inflate: 0,
             mirror: false,
-            solid: KEYCAP_COLOR,
+            solid: capColor,
           })
         }
       }
+    }
+  }
+
+  // 整体角度偏移（视线与角度面板）：绕模型中心 y=15 转，**最后**左乘到全部 part，
+  // 键盘/键帽也一起吃 —— 否则手（按模型空间键位反解）会脱键、浮现字挂点也会偏。
+  // 必须在 squash / shake 之后：压缩轴要跟着身体走，抖动是绝对位移。
+  if (C && C.rot) {
+    for (const part of parts) {
+      if (part.kind === 'quad') part.pos = part.pos.map((v) => transformPoint(C.rot, v))
+      else part.transform = multiply(C.rot, part.transform)
     }
   }
 
@@ -1019,7 +1113,7 @@ function staticParts(skin, opts) {
   return buildParts(defaultPose(), skin, opts)
 }
 
-return { OVERLAY_UV, defaultPose, SQUASH_SHAPE, buildParts, staticParts, baseBody, torsoSpace, bodySpace }
+return { OVERLAY_UV, defaultPose, customRig, SQUASH_SHAPE, buildParts, staticParts, baseBody, torsoSpace, bodySpace }
 })()
 var GEO_MODEL = (function () {
 // Bedrock `.geo.json` 装饰模型（P2-b，plan.md §6.7）。
@@ -2067,7 +2161,7 @@ var PET_ANIM = (function () {
 // 所有动效都是「时间的纯函数 + 少量积分状态」，与 MDP 一致：
 // 没有速度/加速度，只有 breathing_weight 那一个指数衰减量。
 
-var { project, transformPoint } = SKIN_RENDER
+var { project, transformPoint, multiply } = SKIN_RENDER
 var { torsoSpace, bodySpace } = SKIN_MODEL
 var { GestureScheduler } = GESTURES
 var { Spring } = SPRING
@@ -2122,6 +2216,9 @@ const DEFAULT_ANIM = {
   sensY: 1,
   rangeX: 45,
   rangeY: 30,
+  /** 头部朝向的中心偏移（度）：在灵敏度换算之后、范围夹取之前叠加，默认 0 与旧行为一致。 */
+  centerX: 0,
+  centerY: 0,
   /** P2-a v2 物理：打字压缩回弹 / 落地回弹 / 转头惯性。
    *  关掉必须与 P1 逐像素一致（转头退回 trackW 指数平滑、squash 恒为 0）。 */
   physics: true,
@@ -2391,22 +2488,23 @@ class PetAnimator {
     const H = ctx.height
     // 光标离开画布时按画面中上区域算目标，保证权重衰减期间角度是「收回中立」而不是乱指
     const cur = ctx.cursor || { x: W / 2, y: H * 0.36 }
-    const neck = transformPoint(torsoSpace(p), [0, 12, 0])
+    const rig = ctx.customRig || null
+    // 脖子点：自定义躯干偏移与整体旋转都要参与，否则大角度偏转时「转头量」与画面错位
+    let neckLocal = [0, 12, 0]
+    if (rig && rig.body) neckLocal = transformPoint(rig.body, neckLocal)
+    let neck = transformPoint(torsoSpace(p), neckLocal)
+    if (rig && rig.rot) neck = transformPoint(rig.rot, neck)
     const ahead = Q.rotate(VIEW, [0, 3, 0])
     const pt = project([neck[0] + ahead[0], neck[1] + ahead[1], neck[2] + ahead[2]], W, H)
 
     const dx = (cur.x - pt[0]) / Math.max(W * 0.8, 200)
     const dy = (cur.y - pt[1]) / Math.max(H * 0.65, 180)
-    const x = clamp(
-      Math.atan(dx * 0.3 * s.sensX),
-      -s.rangeX * DEG,
-      s.rangeX * DEG,
-    )
-    const y = clamp(
-      Math.atan(dy * 0.95 * s.sensY),
-      -s.rangeY * DEG,
-      s.rangeY * DEG,
-    )
+    let x = Math.atan(dx * 0.3 * s.sensX)
+    if (s.centerX) x += s.centerX * DEG
+    let y = Math.atan(dy * 0.95 * s.sensY)
+    if (s.centerY) y += s.centerY * DEG
+    x = clamp(x, -s.rangeX * DEG, s.rangeX * DEG)
+    y = clamp(y, -s.rangeY * DEG, s.rangeY * DEG)
     // 权重乘在目标角上：want=0 时目标是严格中立，与状态姿态的 head_rotation 一致
     const wantH = clamp(x, -Math.PI / 2, Math.PI / 2) * want
     const wantV = clamp(y, -85 * DEG, 85 * DEG) * want
@@ -2421,8 +2519,10 @@ class PetAnimator {
       Q.rotX(p.head_nod),
     )
     // parent 只取躯干自身的旋转；MDP 里是 model_rotation × crouch 倾斜 × 自定义姿态。
-    // 我们的 torsoSpace 只叠了 body_pitch，其余都是平移。
-    const parent = Q.rotX(p.body_pitch)
+    // 我们的 torsoSpace 只叠了 body_pitch，其余都是平移；自定义躯干/整体角度接在它外面。
+    let parent = Q.rotX(p.body_pitch)
+    if (rig && rig.body) parent = Q.multiply(parent, rig.bodyQ)
+    if (rig && rig.rot) parent = Q.multiply(rig.rotQ, parent)
     const tracked = Q.multiply(Q.conjugate(parent), desired)
     // 权重满时与 P1 逐位一致；权重衰减时朝「状态姿态自带的角度」过渡，
     // 状态切换本身还有 180ms 的 slerp 在跑，两者叠起来是一条连续曲线。
@@ -2445,7 +2545,9 @@ class PetAnimator {
       this._resetTyping()
       return
     }
-    const body = bodySpace(p)
+    // 自定义躯干角度要进肩点与方向反解，否则身体一转手就够不到键盘（键盘在模型空间不动）
+    const rig = ctx.customRig || null
+    const body = rig && rig.body ? multiply(bodySpace(p), rig.body) : bodySpace(p)
     const aw = ctx.armWidth || 4
     const d = Math.max(dt, 0)
 
@@ -3098,9 +3200,25 @@ return {
     cape: 'dshmp-cape',
     bubscale: 'dshmp-bubscale',
     bubpos: 'dshmp-bubpos',
+    /** 设置面板的全部新配置（单个 JSON）。旧键保持原样，不做合并迁移。 */
+    cfg: 'dshmp-cfg',
   }
   var SCALES = [0.7, 0.85, 1, 1.15, 1.3]
   var DECOS = ['none', 'rabbit', 'cat', 'heart', 'lollipop', 'duck']
+
+  /** 自定义姿态的六个部位（键名与配置对象、buildParts 的 custom 一致）。 */
+  var POSE_ROWS = [
+    ['head', '头部'],
+    ['body', '身体'],
+    ['leftArm', '左臂'],
+    ['rightArm', '右臂'],
+    ['leftLeg', '左腿'],
+    ['rightLeg', '右腿'],
+  ]
+  var KB_DEFAULT = '#83878A'
+  /** 菜单底部显示的配置版本：改面板结构时改这个，便于确认加载的是哪版。 */
+  var CFG_VER = 'cfg-4'
+  var cfg = null
 
   var root = null
   var stage = null
@@ -3113,8 +3231,9 @@ return {
   var bubbleDrag = null
 
   var eng = null // 渲染引擎
-  /** bubble 是开关；bubScale 是气泡缩放（0.6~1.6）；bubPos 是气泡在 stage 里的相对位置（0..1，1=贴右边/下边）。 */
-  var opts = { scale: 1, flip: false, pierce: false, bubble: true, deco: 'none', cape: true, x: -1, y: -1, bubScale: 1, bubPos: { x: 1, y: 0 } }
+  /** bubble 是开关；bubScale 是气泡缩放（0.6~1.6）；bubPos 是气泡在 stage 里的相对位置（0..1，1=贴右边/下边）。
+   *  pos 是挂件在**窗口内的相对位置**（同样 0..1，相对可移动范围）；pxPos 只在迁移旧版的绝对像素时用一次。 */
+  var opts = { scale: 1, flip: false, pierce: false, bubble: true, deco: 'none', cape: true, pos: null, pxPos: null, bubScale: 1, bubPos: { x: 1, y: 0 } }
   /** 气泡大小档位步长与范围。 */
   var BUB_MIN = 0.6
   var BUB_MAX = 1.6
@@ -3147,6 +3266,36 @@ return {
   var fall = null
   /** onDown 取消掉的自由落体：只点不拖时要在 pointerup 里接着掉。 */
   var fallResume = null
+  /** 最近一次「比例 → 位置」用的视口尺寸；persistPos 据此判断 rect 与当前视口是否同一套坐标。 */
+  var layoutStamp = null
+  /** 位置事件的最近 8 条留痕（摆位 / 落盘），探针里读得到。 */
+  var posLog = []
+  /** 挂件版本：改 package.json 时同步（tools/test-widget.mjs 会比对，漏改会红）。 */
+  var PET_VER = '1.0.0'
+  /** 定位实现版本：菜单底部与探针里都能看到，用来确认「改动到底加载了没有」。 */
+  var POS_VER = 'pct-1'
+  /** 帧循环里记住的视口尺寸，变了就重排（不依赖 resize 事件是否可靠）。 */
+  var viewportSeen = { w: 0, h: 0 }
+  /** resize 之后的补一拍定时器。 */
+  var resizeTimer = 0
+  /** 自定义骨架缓存：`sit` 没变就复用，稳态零分配。 */
+  var customRigCache = null
+  var customSit = -1
+  /** 配置写盘防抖。 */
+  var cfgTimer = 0
+  /** 键盘盒/键帽的 RGB；null = 走 skin-model 的内置常量（默认画面）。 */
+  var kbSolid = null
+  var kbCapSolid = null
+  /** 面板是否打开（**不要**再用 className.indexOf('on')：`on` 是子串，容易误判）。 */
+  var menuOpen = false
+  /** 最近一次弹出面板的视口坐标：切 tab 后要按新高度重夹取。 */
+  var menuAt = { x: 0, y: 0 }
+  /** 当前 tab。 */
+  var panelTab = 'general'
+  /** 正在编辑哪一套姿态（stand / sit），持久化在 cfg.poseSet。 */
+  var poseSet = 'stand'
+  /** 强制姿态的当前插值量（0..1），-1 表示不干预（跟随宿主）。 */
+  var forcedSitNow = -1
   /** 用户打字的「仍在敲」窗口（ms）：宿主报 idle 时用它把状态临时扳成 working。 */
   var paintError = ''
   var painted = 0
@@ -3236,15 +3385,45 @@ return {
     'opacity:0;transform:translateY(-4px);transition:opacity .18s,transform .18s;pointer-events:none}' +
     '.dshmp-toast.on{opacity:1;transform:none}' +
     // 右键在光标处弹出：left/top 由 openMenuAt() 按视口夹取后写入
-    '.dshmp-menu{position:absolute;left:0;top:0;width:190px;padding:6px;border-radius:12px;' +
+    '.dshmp-menu{position:absolute;left:0;top:0;width:380px;max-width:calc(100vw - 16px);' +
+    'padding:0;border-radius:12px;display:none;flex-direction:column;overflow:hidden;' +
     'background:rgba(22,22,26,.94);border:1px solid rgba(255,255,255,.12);' +
-    'box-shadow:0 10px 26px rgba(0,0,0,.42);display:none;' +
-    // 账号面板展开后菜单会变高，别顶出屏幕
-    'max-height:min(360px, calc(100vh - 16px));overflow-y:auto;overscroll-behavior:contain}' +
-    '.dshmp-menu.on{display:block}' +
+    'box-shadow:0 10px 26px rgba(0,0,0,.42);' +
+    // 面板比挂件宽：靠 root 不设 overflow 溢出显示；高度交给内部滚动，tab 条固定
+    'max-height:min(500px, calc(100vh - 16px))}' +
+    '.dshmp-menu.on{display:flex}' +
+    '.dshmp-tabs{display:flex;gap:4px;padding:6px 6px 4px;flex:0 0 auto;' +
+    'border-bottom:1px solid rgba(255,255,255,.08)}' +
+    '.dshmp-tab{flex:1;padding:5px 0;border:0;border-radius:7px;cursor:pointer;font:12px/1.2 inherit;' +
+    'background:rgba(255,255,255,.06);color:#cfcfd6}' +
+    '.dshmp-tab.on{background:rgba(90,170,255,.22);color:#cfe6ff}' +
+    '.dshmp-panes{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:6px}' +
+    '.dshmp-pane{display:none}' +
+    '.dshmp-pane.on{display:block}' +
+    '.dshmp-group-t{padding:6px 7px 2px;font-size:11px;opacity:.5}' +
+    '.dshmp-hint{padding:6px 7px 2px;font-size:10px;line-height:1.4;opacity:.4}' +
+    '.dshmp-field{display:flex;align-items:center;gap:8px;padding:3px 7px}' +
+    '.dshmp-field > span{flex:0 0 76px;opacity:.72}' +
+    '.dshmp-field > input[type=range]{flex:1 1 auto;min-width:0;height:14px;accent-color:#7fb6ff;cursor:pointer}' +
+    '.dshmp-field > b{flex:0 0 46px;text-align:right;font-weight:500}' +
+    '.dshmp-seg{display:flex;gap:4px}' +
+    '.dshmp-seg i{padding:2px 8px;border-radius:6px;font-style:normal;cursor:pointer;' +
+    'background:rgba(255,255,255,.08)}' +
+    '.dshmp-seg i.on{background:rgba(90,170,255,.28);color:#cfe6ff}' +
+    '.dshmp-pose-row{display:flex;align-items:center;gap:4px;padding:2px 7px}' +
+    '.dshmp-pose-row > span{flex:0 0 30px;opacity:.72}' +
+    '.dshmp-pose-row > input[type=range]{flex:1 1 0;min-width:0;height:14px;accent-color:#7fb6ff;cursor:pointer}' +
+    '.dshmp-pose-row > b{flex:0 0 72px;text-align:right;font-weight:500;font-size:11px;opacity:.8}' +
+    '.dshmp-hex{width:78px!important;flex:0 0 78px}' +
+    '.dshmp-swatch{flex:0 0 auto;width:14px;height:14px;border-radius:4px;display:inline-block;' +
+    'border:1px solid rgba(255,255,255,.2);background:#83878A}' +
+    '.dshmp-input.bad{border-color:rgba(255,110,110,.75)}' +
     '.dshmp-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 7px;' +
     'border-radius:8px;cursor:pointer}' +
     '.dshmp-row:hover{background:rgba(255,255,255,.07)}' +
+    // 菜单底部的版本号：桌面版不一定能开 DevTools，靠它一眼确认「改动到底加载了没有」
+    '.dshmp-ver{padding:1px 7px 2px;font-size:10px;line-height:1.3;opacity:.35;text-align:right;' +
+    'cursor:default;user-select:text;-webkit-user-select:text}' +
     '.dshmp-row span{opacity:.72}' +
     '.dshmp-row b{font-weight:500}' +
     '.dshmp-step{display:flex;gap:4px}' +
@@ -3310,7 +3489,7 @@ return {
   function init() {
     // 每一步单独 try：装修建 DOM 这种「一步失败就全灭」的写法，出问题时页面上什么线索都没有
     // （R2 第一版就是 `startFrameLoop()` 这个不存在的函数把 init 整个炸掉，画布全透明）。
-    var steps = [injectCss, readOpts, buildDom, bindGlobal, loadRole, loadAccount]
+    var steps = [injectCss, readOpts, readCfg, buildDom, bindGlobal, loadRole, loadAccount]
     for (var i = 0; i < steps.length; i++) {
       try {
         steps[i]()
@@ -3334,12 +3513,211 @@ return {
       var by = Number(bp[1])
       if (isFinite(bx) && isFinite(by)) opts.bubPos = { x: Math.max(0, Math.min(1, bx)), y: Math.max(0, Math.min(1, by)) }
     }
+    // 位置存的是**窗口内的相对比例**（0..1，相对可移动范围），不是绝对像素：
+    // 全屏↔窗口化切换时 innerWidth / innerHeight 会变，存像素就会让小人「跑到别处」。
     var p = String(get(LS.pos, '') || '').split(',')
-    opts.x = isFinite(Number(p[0])) && p[0] !== '' ? Number(p[0]) : -1
-    opts.y = isFinite(Number(p[1])) && p[1] !== '' ? Number(p[1]) : -1
+    opts.pos = null
+    opts.pxPos = null
+    if (p.length === 2 && p[0] !== '' && p[1] !== '') {
+      var p0 = Number(p[0])
+      var p1 = Number(p[1])
+      if (isFinite(p0) && isFinite(p1)) {
+        // 0.4.x 及以前存的是绝对像素（几乎总是 > 1）：首次布局时折成比例并改写存储
+        if (p0 > 1 || p1 > 1) opts.pxPos = { x: p0, y: p1 }
+        else opts.pos = { x: Math.max(0, Math.min(1, p0)), y: Math.max(0, Math.min(1, p1)) }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- 自定义配置（dshmp-cfg）
+
+  /** 六个部位的三轴角度全 0（度）。 */
+  function zeroRows() {
+    var o = {}
+    for (var i = 0; i < POSE_ROWS.length; i++) o[POSE_ROWS[i][0]] = [0, 0, 0]
+    return o
+  }
+
+  /** 默认配置：每个字段都必须对应「与改动前完全一致」的行为。 */
+  function defaultCfg() {
+    return {
+      v: 1,
+      rot: { x: 0, y: 0, z: 0 },
+      track: true,
+      // 灵敏度是百分比（100 = 引擎里的 sensX 1.0）；范围沿用引擎现值 45/30，别改
+      sensX: 100,
+      sensY: 100,
+      rangeX: 45,
+      rangeY: 30,
+      centerX: 0,
+      centerY: 0,
+      pose: { stand: zeroRows(), sit: zeroRows() },
+      // auto = 跟随宿主状态（默认）；stand / sit = 选中后人物一直保持该姿态
+      poseMode: 'auto',
+      poseSet: 'stand',
+      keyboard: { style: 'detail', color: KB_DEFAULT },
+    }
+  }
+
+  function numOr(v, dflt, lo, hi) {
+    var n = Number(v)
+    if (!isFinite(n)) return dflt
+    return Math.max(lo, Math.min(hi, n))
+  }
+
+  function normRows(src, out) {
+    for (var i = 0; i < POSE_ROWS.length; i++) {
+      var row = src && src[POSE_ROWS[i][0]]
+      out[POSE_ROWS[i][0]] = [
+        numOr(row && row[0], 0, -90, 90),
+        numOr(row && row[1], 0, -90, 90),
+        numOr(row && row[2], 0, -90, 90),
+      ]
+    }
+  }
+
+  function normColor(v, dflt) {
+    var s = String(v || '').replace(/^#/, '')
+    return /^[0-9a-fA-F]{6}$/.test(s) ? '#' + s.toUpperCase() : dflt
+  }
+
+  /** 逐字段归一化：缺字段取默认、非法值回默认、超范围夹住。坏 JSON 由 readCfg 兜底。 */
+  function normalizeCfg(raw) {
+    var d = defaultCfg()
+    if (!raw || typeof raw !== 'object') return d
+    var rot = raw.rot || {}
+    d.rot = {
+      x: numOr(rot.x, 0, -180, 180),
+      y: numOr(rot.y, 0, -180, 180),
+      z: numOr(rot.z, 0, -180, 180),
+    }
+    d.track = raw.track !== false
+    d.sensX = numOr(raw.sensX, 100, 0, 300)
+    d.sensY = numOr(raw.sensY, 100, 0, 300)
+    d.rangeX = numOr(raw.rangeX, 45, 0, 85)
+    d.rangeY = numOr(raw.rangeY, 30, 0, 85)
+    d.centerX = numOr(raw.centerX, 0, -60, 60)
+    d.centerY = numOr(raw.centerY, 0, -60, 60)
+    var pose = raw.pose || {}
+    normRows(pose.stand, d.pose.stand)
+    normRows(pose.sit, d.pose.sit)
+    d.poseMode = raw.poseMode === 'stand' || raw.poseMode === 'sit' ? raw.poseMode : 'auto'
+    d.poseSet = raw.poseSet === 'sit' ? 'sit' : 'stand'
+    var kb = raw.keyboard || {}
+    d.keyboard = {
+      style: kb.style === 'simple' ? 'simple' : 'detail',
+      color: normColor(kb.color, KB_DEFAULT),
+    }
+    return d
+  }
+
+  function hexToRgb(hex) {
+    var s = String(hex || '').replace(/^#/, '')
+    if (!/^[0-9a-fA-F]{6}$/.test(s)) return null
+    return [parseInt(s.slice(0, 2), 16), parseInt(s.slice(2, 4), 16), parseInt(s.slice(4, 6), 16)]
+  }
+
+  function readCfg() {
+    var raw = null
+    var text = String(get(LS.cfg, '') || '')
+    if (text) {
+      try {
+        raw = JSON.parse(text)
+      } catch (err) {
+        // 静默失败会让「设置莫名其妙不生效」没法查 —— 留痕给探针
+        window.__dshPetError = 'cfg: ' + String((err && err.message) || err).slice(0, 160)
+      }
+    }
+    cfg = normalizeCfg(raw)
+    poseSet = cfg.poseSet
+    syncCfgDerived()
+  }
+
+  /** 配置 → 动效设置 / 键盘颜色。默认色号时传 null，让 buildParts 走内置常量（画面与旧版一致）。 */
+  function syncCfgDerived() {
+    animSettings.track = cfg.track
+    animSettings.sensX = cfg.sensX / 100
+    animSettings.sensY = cfg.sensY / 100
+    animSettings.rangeX = cfg.rangeX
+    animSettings.rangeY = cfg.rangeY
+    animSettings.centerX = cfg.centerX
+    animSettings.centerY = cfg.centerY
+    kbSolid = cfg.keyboard.color === KB_DEFAULT ? null : hexToRgb(cfg.keyboard.color)
+    kbCapSolid = null
+    customSit = -1 // 强制重建 rig
+  }
+
+  /** 写盘（防抖 120ms；滑块拖动时别每个像素都 JSON.stringify + localStorage）。 */
+  function cfgChanged() {
+    syncCfgDerived()
+    if (cfgTimer) return
+    cfgTimer = setTimeout(function () {
+      cfgTimer = 0
+      flushCfg()
+    }, 120)
+  }
+
+  function flushCfg() {
+    if (cfgTimer) {
+      clearTimeout(cfgTimer)
+      cfgTimer = 0
+    }
+    set(LS.cfg, JSON.stringify(cfg))
+  }
+
+  /** 有没有任何「非零」的自定义：全零时 customAt 返回 null，渲染完全走旧路径。 */
+  function hasCustom() {
+    if (!cfg) return false
+    if (cfg.rot.x || cfg.rot.y || cfg.rot.z) return true
+    for (var i = 0; i < POSE_ROWS.length; i++) {
+      var k = POSE_ROWS[i][0]
+      var a = cfg.pose.stand[k]
+      var b = cfg.pose.sit[k]
+      if ((a && (a[0] || a[1] || a[2])) || (b && (b[0] || b[1] || b[2]))) return true
+    }
+    return false
+  }
+
+  /** 每帧最多算一次 rig：sit 没变就复用（稳态零分配）。 */
+  function customAt(sit) {
+    if (!hasCustom()) return null
+    if (customRigCache && Math.abs(sit - customSit) < 1e-4) return customRigCache
+    customRigCache = load().model.customRig(cfg, sit)
+    customSit = sit
+    return customRigCache
+  }
+
+  /**
+   * 姿态选择：'stand' / 'sit' 时人物**一直保持**该姿态（存在 cfg.poseMode 里，重启也在），
+   * 'auto' 则跟随宿主状态。返回 -1 表示不干预。
+   */
+  function forcedSit() {
+    if (!cfg) return -1
+    if (cfg.poseMode === 'sit') return 1
+    if (cfg.poseMode === 'stand') return 0
+    return -1
   }
 
   function buildDom() {
+    // 滑块行：不带 data-row —— click 委托里的 closest('[data-row]') 会把滑块当开关点掉
+    var field = function (label, key, min, max, step, unit) {
+      return (
+        '<div class="dshmp-field"><span>' + label + '</span>' +
+        '<input type="range" data-cfg="' + key + '" min="' + min + '" max="' + max + '" step="' + step + '">' +
+        '<b data-cfg-v="' + key + '">' + (unit || '') + '</b></div>'
+      )
+    }
+    var poseRow = function (key, label) {
+      var one = function (axis) {
+        return '<input type="range" data-pose="' + key + '" data-axis="' + axis + '" min="-90" max="90" step="1">'
+      }
+      return (
+        '<div class="dshmp-pose-row"><span>' + label + '</span>' + one(0) + one(1) + one(2) +
+        '<b data-pose-v="' + key + '">0/0/0</b></div>'
+      )
+    }
+    var poseRows = POSE_ROWS.map(function (r) { return poseRow(r[0], r[1]) }).join('')
+
     root = document.createElement('div')
     root.className = 'dshmp-root'
     root.innerHTML =
@@ -3349,6 +3727,13 @@ return {
       '<div class="dshmp-toast"></div>' +
       '</div>' +
       '<div class="dshmp-menu">' +
+      '<div class="dshmp-tabs">' +
+      '<button class="dshmp-tab on" data-tab="general">常规</button>' +
+      '<button class="dshmp-tab" data-tab="view">视线与角度</button>' +
+      '<button class="dshmp-tab" data-tab="other">其他设置</button>' +
+      '</div>' +
+      '<div class="dshmp-panes">' +
+      '<div class="dshmp-pane on" data-pane="general">' +
       '<div class="dshmp-row" data-row="scale"><span>大小</span><div class="dshmp-step"><i data-step="-1">−</i><b data-scale>100%</b><i data-step="1">+</i></div></div>' +
       '<div class="dshmp-row" data-row="flip"><span>水平翻转</span><b data-flip>关</b></div>' +
       '<div class="dshmp-row" data-row="pierce"><span>鼠标穿透</span><b data-pierce>关</b></div>' +
@@ -3367,6 +3752,50 @@ return {
       '<div class="dshmp-acct-msg" data-acct-msg></div>' +
       '</div>' +
       '<div class="dshmp-row" data-row="reset"><span>重置位置</span></div>' +
+      '</div>' +
+      '<div class="dshmp-pane" data-pane="view">' +
+      '<div class="dshmp-group-t">整体角度</div>' +
+      field('前后俯仰 X', 'rot.x', -180, 180, 1, '°') +
+      field('左右转向 Y', 'rot.y', -180, 180, 1, '°') +
+      field('左右倾斜 Z', 'rot.z', -180, 180, 1, '°') +
+      '<div class="dshmp-row" data-cfg-zero="rot"><span>角度归零</span></div>' +
+      '<div class="dshmp-group-t">视线跟随鼠标</div>' +
+      '<div class="dshmp-row" data-row="track"><span>视线跟随</span><b data-track>开</b></div>' +
+      '<div class="dshmp-row" data-cfg-zero="track"><span>跟随复位</span></div>' +
+      field('水平灵敏度', 'sensX', 0, 300, 5, '%') +
+      field('水平范围', 'rangeX', 0, 85, 1, '°') +
+      field('水平中心', 'centerX', -60, 60, 1, '°') +
+      field('垂直灵敏度', 'sensY', 0, 300, 5, '%') +
+      field('垂直范围', 'rangeY', 0, 85, 1, '°') +
+      field('垂直中心', 'centerY', -60, 60, 1, '°') +
+      '<div class="dshmp-hint">负值偏左 / 抬头，正值偏右 / 低头</div>' +
+      '</div>' +
+      '<div class="dshmp-pane" data-pane="other">' +
+      '<div class="dshmp-group-t">自定义姿态</div>' +
+      '<div class="dshmp-row"><span>姿态</span><div class="dshmp-seg">' +
+      '<i data-seg="posemode" data-val="auto">跟随</i>' +
+      '<i data-seg="posemode" data-val="stand">站姿</i>' +
+      '<i data-seg="posemode" data-val="sit">坐姿</i>' +
+      '</div></div>' +
+      '<div class="dshmp-row"><span>编辑</span><div class="dshmp-seg">' +
+      '<i data-seg="pose" data-val="stand" class="on">站姿</i>' +
+      '<i data-seg="pose" data-val="sit">坐姿</i>' +
+      '</div></div>' +
+      poseRows +
+      '<div class="dshmp-row" data-cfg-zero="pose"><span>姿态归零</span></div>' +
+      '<div class="dshmp-hint">「跟随」按宿主状态站或坐；选站姿/坐姿则一直保持（站姿时不会有打字浮现字）</div>' +
+      '<div class="dshmp-group-t">键盘</div>' +
+      '<div class="dshmp-row"><span>键盘样式</span><div class="dshmp-seg">' +
+      '<i data-seg="kbstyle" data-val="simple">简洁</i>' +
+      '<i data-seg="kbstyle" data-val="detail" class="on">细节</i>' +
+      '</div></div>' +
+      '<div class="dshmp-field"><span>键盘色号</span>' +
+      '<input class="dshmp-input dshmp-hex" data-cfg="kbcolor" maxlength="7" spellcheck="false">' +
+      '<i class="dshmp-swatch" data-swatch></i></div>' +
+      '<div class="dshmp-hint">角度过大时人物可能有部分越出画面</div>' +
+      '</div>' +
+      '</div>' +
+      '<div class="dshmp-ver"><span data-ver></span></div>' +
       '</div>'
     var host = document.body || document.documentElement
     host.appendChild(root)
@@ -3382,24 +3811,117 @@ return {
       c2d = canvas.getContext('2d')
     }
     applyOpts()
+    // 旧版存的是像素，折算成比例要真实尺寸；首帧万一还没量出来，下一拍再对一次
+    setTimeout(layoutPos, 0)
     bindLocal()
     startPolling() // 首帧由 loadRole 结束时的 scheduleFrame() 起
+  }
+
+  // ---------------------------------------------------------------- 位置（窗口相对比例）
+
+  function clamp01(v) {
+    return Math.max(0, Math.min(1, v))
+  }
+
+  /** 挂件像素宽：按缩放算，小窗口时高度最多占 60%（再按裁切框比例反推宽度）。 */
+  function widgetWidth() {
+    var w = Math.round(282 * opts.scale * (CROP.w / W))
+    var maxH = Math.max(150, window.innerHeight * 0.6)
+    return Math.min(w, Math.round((maxH * CROP.w) / CROP.h))
+  }
+
+  /** 位置的可移动范围（窗口减去挂件自身尺寸）。分母兜 1：窗口比挂件还小时不能除以 0。 */
+  function posBox() {
+    return {
+      maxX: Math.max(1, window.innerWidth - (root.offsetWidth || 0)),
+      maxY: Math.max(1, window.innerHeight - (root.offsetHeight || 0)),
+    }
+  }
+
+  /** 旧版存的绝对像素 → 比例。只做一次，成功后立刻改写存储，避免每次启动都折算。 */
+  function migratePos() {
+    if (!opts.pxPos) return
+    if (!root.offsetWidth || !root.offsetHeight) return // 还没布局出来，等下一次
+    var box = posBox()
+    opts.pos = { x: clamp01(opts.pxPos.x / box.maxX), y: clamp01(opts.pxPos.y / box.maxY) }
+    opts.pxPos = null
+    // 直接按算出来的比例落盘；不能走 persistPos() —— 那会读回当前（还没搬过去的）DOM 位置
+    set(LS.pos, opts.pos.x.toFixed(4) + ',' + opts.pos.y.toFixed(4))
+  }
+
+  /**
+   * 比例 → 位置。
+   *
+   * 关键：**不写像素**，写「百分比 + 自身比例的反向位移」。
+   * 对 fixed 元素来说 `left: 50%` 相对的是**视口宽度**，而 `translateX(-50%)` 相对的是**自身宽度**，
+   * 两者相加正好等于 `0.5 * (视口宽 - 挂件宽)` —— 这就是「相对位置」的定义本身。
+   * 好处：窗口尺寸一变，浏览器自己就重算好了，**不依赖 resize 事件是否准时、是否漏报**，
+   * 也不依赖 `offsetWidth` 量得对不对。之前存像素正是死在这两件事上：事件早报/漏报一次，
+   * 人物就永远停在按旧尺寸算出来的像素上，在大窗口里看就是「跑到中间」。
+   */
+  function layoutPos() {
+    // 拖动与自由落体用的是像素（跟光标 / 跟重力），别覆盖
+    if (drag || fall) return
+    migratePos()
+    if (!opts.pos) return // 没拖过：交给 CSS 的 right/bottom 默认锚点
+    var rx = opts.pos.x
+    var ry = opts.pos.y
+    layoutStamp = { vw: window.innerWidth, vh: window.innerHeight }
+    viewportSeen.w = layoutStamp.vw
+    viewportSeen.h = layoutStamp.vh
+    root.style.left = (rx * 100).toFixed(4) + '%'
+    root.style.top = (ry * 100).toFixed(4) + '%'
+    root.style.right = 'auto'
+    root.style.bottom = 'auto'
+    root.style.transform = 'translate(' + (-rx * 100).toFixed(4) + '%, ' + (-ry * 100).toFixed(4) + '%)'
+    notePos('layout')
+  }
+
+  /** 视口变化后的重排：宽度（高度上限会跟着变）与气泡要重算；位置由百分比自己跟。 */
+  function relayout() {
+    if (!root) return
+    root.style.width = widgetWidth() + 'px'
+    applyBubble()
+  }
+
+  /** 位置事件留痕（只留最近 8 条）：真机再出问题，读 __dshPetState().posLog 就能还原经过了什么。 */
+  function notePos(what) {
+    try {
+      var r = root.getBoundingClientRect()
+      posLog.push({
+        what: what,
+        t: Math.round(performance.now()),
+        vw: window.innerWidth,
+        vh: window.innerHeight,
+        left: Math.round(r.left),
+        top: Math.round(r.top),
+        pos: opts.pos ? [+opts.pos.x.toFixed(3), +opts.pos.y.toFixed(3)] : null,
+        css: String(root.style.left || '') + '|' + String(root.style.transform || ''),
+      })
+      if (posLog.length > 8) posLog.shift()
+    } catch (err) {}
+  }
+
+  /**
+   * 帧循环里盯一眼视口尺寸。
+   * 不能只靠 `resize` 事件：Electron 全屏/最大化的过渡动画里它可能先报一次（此时 innerWidth
+   * 还是旧值）也可能漏报，结果就是「人物停在按旧尺寸算出来的像素上」，看起来像跑到了中间。
+   */
+  function checkViewport() {
+    var vw = window.innerWidth
+    var vh = window.innerHeight
+    if (vw === viewportSeen.w && vh === viewportSeen.h) return
+    viewportSeen.w = vw
+    viewportSeen.h = vh
+    if (fall) fall.floor = floorTop()
+    relayout()
   }
 
   function applyOpts() {
     // 282 是「整张 352 宽画布」时代的基准宽；按裁切比例缩回去，屏幕上的人物大小不变，
     // 变小的只是四周那圈空白（挂件因此能更贴边）
-    var w = Math.round(282 * opts.scale * (CROP.w / W))
-    // 小窗口别把整个人顶出屏幕：高度最多占 60%，再按裁切框比例反推宽度
-    var maxH = Math.max(150, window.innerHeight * 0.6)
-    w = Math.min(w, Math.round((maxH * CROP.w) / CROP.h))
-    root.style.width = w + 'px'
-    if (opts.x >= 0 && opts.y >= 0) {
-      root.style.left = opts.x + 'px'
-      root.style.top = opts.y + 'px'
-      root.style.right = 'auto'
-      root.style.bottom = 'auto'
-    }
+    root.style.width = widgetWidth() + 'px'
+    layoutPos()
     root.className =
       'dshmp-root' +
       (opts.flip ? ' is-flip' : '') +
@@ -3411,6 +3933,9 @@ return {
     root.querySelector('[data-bubble]').textContent = opts.bubble ? '开' : '关'
     root.querySelector('[data-deco]').textContent =
       ({ none: '无', rabbit: '兔耳', cat: '猫耳', heart: '爱心', lollipop: '棒棒糖', duck: '小鸭' })[opts.deco] || '无'
+    var verEl = root.querySelector('[data-ver]')
+    if (verEl) verEl.textContent = PET_VER + ' · ' + POS_VER + ' · ' + CFG_VER
+    syncPanel()
     renderAccount()
     applyBubble()
     if (opts.pierce) ensureResumeBtn()
@@ -3472,20 +3997,147 @@ return {
   // ---------------------------------------------------------------- 菜单开合
 
   function closeMenu() {
-    if (menuEl) menuEl.className = 'dshmp-menu'
+    menuOpen = false
+    flushCfg()
+    if (menuEl) menuEl.classList.remove('on')
+  }
+
+  /**
+   * 摆放面板：**优先放到人物外侧**，别再压住小人。
+   * 顺序：右侧 → 左侧 → 上方 → 下方 → 实在放不下才以光标为中心（再夹进视口）。
+   * `cx/cy` 只是最后的兜底参考点（右键总是落在挂件上，所以正常情况下用不到）。
+   */
+  function placeMenu(cx, cy) {
+    var mw = menuEl.offsetWidth || 380
+    var mh = menuEl.offsetHeight || 500
+    var r = root.getBoundingClientRect()
+    var gap = 10
+    var fitR = r.right + gap + mw <= window.innerWidth - 8
+    var fitL = r.left - gap - mw >= 8
+    var fitU = r.top - gap - mh >= 8
+    var fitD = r.bottom + gap + mh <= window.innerHeight - 8
+    var left
+    var top
+    if (fitR) {
+      left = r.right + gap
+      top = r.top
+    } else if (fitL) {
+      left = r.left - gap - mw
+      top = r.top
+    } else if (fitU) {
+      left = r.left + r.width / 2 - mw / 2
+      top = r.top - gap - mh
+    } else if (fitD) {
+      left = r.left + r.width / 2 - mw / 2
+      top = r.bottom + gap
+    } else {
+      left = cx - mw / 2
+      top = cy - mh / 2
+    }
+    left = Math.max(8, Math.min(left, window.innerWidth - mw - 8))
+    top = Math.max(8, Math.min(top, window.innerHeight - mh - 8))
+    menuEl.style.left = Math.round(left - r.left) + 'px'
+    menuEl.style.top = Math.round(top - r.top) + 'px'
   }
 
   /** 右键在光标处打开：按视口夹住，避免菜单跑出屏幕。 */
   function openMenuAt(cx, cy) {
-    menuEl.className = 'dshmp-menu on'
+    menuOpen = true
+    // 先加 on 才有 offsetWidth（display:none 时量到 0）
+    menuEl.classList.add('on')
+    menuAt = { x: cx, y: cy }
+    syncPanel()
     renderBubbleMenu()
-    var mw = menuEl.offsetWidth || 190
-    var mh = menuEl.offsetHeight || 240
-    var r = root.getBoundingClientRect()
-    var vx = Math.max(8, Math.min(cx, window.innerWidth - mw - 8))
-    var vy = Math.max(8, Math.min(cy, window.innerHeight - mh - 8))
-    menuEl.style.left = Math.round(vx - r.left) + 'px'
-    menuEl.style.top = Math.round(vy - r.top) + 'px'
+    placeMenu(cx, cy)
+  }
+
+  function setTab(name) {
+    panelTab = name === 'view' || name === 'other' ? name : 'general'
+    var tabs = menuEl.querySelectorAll('[data-tab]')
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].classList[tabs[i].getAttribute('data-tab') === panelTab ? 'add' : 'remove']('on')
+    }
+    var panes = menuEl.querySelectorAll('[data-pane]')
+    for (var j = 0; j < panes.length; j++) {
+      panes[j].classList[panes[j].getAttribute('data-pane') === panelTab ? 'add' : 'remove']('on')
+    }
+    var box = menuEl.querySelector('.dshmp-panes')
+    if (box) box.scrollTop = 0
+    placeMenu(menuAt.x, menuAt.y)
+  }
+
+  /** 把配置回填到面板控件上；正在拖的控件不回写（否则滑块会被拽回去）。 */
+  function syncPanel() {
+    if (!menuEl || !cfg) return
+    var i
+    var inputs = menuEl.querySelectorAll('[data-cfg]')
+    for (i = 0; i < inputs.length; i++) {
+      var el = inputs[i]
+      var key = el.getAttribute('data-cfg')
+      if (key === 'kbcolor') {
+        if (document.activeElement !== el) el.value = cfg.keyboard.color
+        continue
+      }
+      if (document.activeElement === el) continue
+      el.value = String(cfgValue(key))
+    }
+    var labels = menuEl.querySelectorAll('[data-cfg-v]')
+    for (i = 0; i < labels.length; i++) {
+      var k = labels[i].getAttribute('data-cfg-v')
+      var v = cfgValue(k)
+      labels[i].textContent = k.indexOf('sens') === 0 ? v + '%' : v + '°'
+    }
+    var row = cfg.pose[poseSet]
+    var poseInputs = menuEl.querySelectorAll('[data-pose]')
+    for (i = 0; i < poseInputs.length; i++) {
+      var p = poseInputs[i]
+      var pk = p.getAttribute('data-pose')
+      var axis = Number(p.getAttribute('data-axis'))
+      var val = (row[pk] && row[pk][axis]) || 0
+      if (document.activeElement !== p) p.value = String(val)
+    }
+    var poseLabels = menuEl.querySelectorAll('[data-pose-v]')
+    for (i = 0; i < poseLabels.length; i++) {
+      var lk = poseLabels[i].getAttribute('data-pose-v')
+      var arr = row[lk] || [0, 0, 0]
+      poseLabels[i].textContent = arr[0] + '/' + arr[1] + '/' + arr[2]
+    }
+    var trackEl = menuEl.querySelector('[data-track]')
+    if (trackEl) trackEl.textContent = cfg.track ? '开' : '关'
+    var segs = menuEl.querySelectorAll('[data-seg]')
+    for (i = 0; i < segs.length; i++) {
+      var kind = segs[i].getAttribute('data-seg')
+      var val = segs[i].getAttribute('data-val')
+      var on = kind === 'pose' ? val === poseSet : kind === 'posemode' ? val === cfg.poseMode : val === cfg.keyboard.style
+      segs[i].classList[on ? 'add' : 'remove']('on')
+    }
+    var sw = menuEl.querySelector('[data-swatch]')
+    if (sw) sw.style.background = cfg.keyboard.color
+  }
+
+  /** 读一个配置项（支持 `rot.x` 这种点路径）。 */
+  function cfgValue(key) {
+    if (key === 'sensX' || key === 'sensY' || key === 'rangeX' || key === 'rangeY' || key === 'centerX' || key === 'centerY') {
+      return cfg[key]
+    }
+    var dot = key.indexOf('.')
+    if (dot > 0) return cfg[key.slice(0, dot)][key.slice(dot + 1)]
+    return 0
+  }
+
+  /** 写一个配置项（面板 input 事件用），逐项夹到各自范围。 */
+  function setCfgValue(key, value) {
+    if (key === 'sensX' || key === 'sensY') cfg[key] = Math.max(0, Math.min(300, value))
+    else if (key === 'rangeX' || key === 'rangeY') cfg[key] = Math.max(0, Math.min(85, value))
+    else if (key === 'centerX' || key === 'centerY') cfg[key] = Math.max(-60, Math.min(60, value))
+    else {
+      var dot = key.indexOf('.')
+      if (dot > 0) {
+        var g = key.slice(0, dot)
+        var f = key.slice(dot + 1)
+        if (cfg[g]) cfg[g][f] = Math.max(-180, Math.min(180, value))
+      }
+    }
   }
 
   // 穿透状态下整块都在 pointer-events:none，点击会落到页面上；留一个小圆点才能自己出来
@@ -3903,6 +4555,9 @@ return {
   function tick(nowMs) {
     frameTimer = 0
     if (!eng) return
+    // 视口变了就重排：不依赖 resize 事件（见 checkViewport 的注释）。
+    // 放在门控之前，被节流的帧也要能发现尺寸变化。
+    checkViewport()
     // rAF 的节奏等于显示器刷新率，144/165Hz 屏上会被带着画 144 次/秒（单帧 4.4ms ⇒ 63% 单核）。
     // 这里按目标间隔门控：动效 60fps、idle 30fps，超出的帧只续下一帧、不重绘。
     var targetMs = demand() >= 2 ? 16 : IDLE_FRAME_MS
@@ -3918,8 +4573,20 @@ return {
       if (fall) stepFall(dt)
       eng.machine.tick(nowMs)
       typingMachine(nowMs, nowSec)
+      var basePose = eng.machine.pose(nowMs)
+      // 姿态选择（站姿 / 坐姿）是持久化的：选中就一直保持，'跟随' 才交还宿主。
+      // 换 sit 时用 120ms 指数过渡，避免人物一帧内从站变坐（视觉上像瞬移）。
+      var pv = forcedSit()
+      if (pv >= 0) {
+        if (forcedSitNow < 0) forcedSitNow = basePose.sit || 0
+        forcedSitNow += (pv - forcedSitNow) * (1 - Math.exp(-dt / 0.12))
+        if (Math.abs(pv - forcedSitNow) < 0.002) forcedSitNow = pv
+        basePose = Object.assign({}, basePose, { sit: forcedSitNow })
+      } else {
+        forcedSitNow = -1
+      }
       var pose = eng.anim.update(
-        eng.machine.pose(nowMs),
+        basePose,
         {
           width: W,
           height: H,
@@ -3927,6 +4594,8 @@ return {
           armWidth: eng.armWidth,
           state: eng.machine.state,
           settings: animSettings,
+          // 自定义骨架：只读，动效层用它补偿头部跟随与打字反解
+          customRig: customAt(basePose.sit),
         },
         nowSec,
         dt
@@ -3986,6 +4655,10 @@ return {
       outer: true,
       armWidth: eng.armWidth,
       cape: opts.cape ? eng.capeTex : null,
+      // 自定义姿态：全零时 customAt 返回 null，buildParts 走原路径（画面与旧版逐像素一致）
+      custom: customAt(pose.sit),
+      keycaps: !cfg || cfg.keyboard.style !== 'simple',
+      keyboardColor: kbSolid,
     })
     var head = null
     eng.kb = null
@@ -4046,8 +4719,7 @@ return {
   function bindLocal() {
     root.addEventListener('pointerdown', onDown, true)
     root.addEventListener('pointerdown', function (e) {
-      var open = menuEl.className.indexOf('on') >= 0
-      if (open && !menuEl.contains(e.target)) closeMenu()
+      if (menuOpen && !menuEl.contains(e.target)) closeMenu()
     })
 
     // 右键打开菜单（⋮ 按钮已去掉）：在光标处弹出，按视口夹住不出屏
@@ -4100,6 +4772,52 @@ return {
         unbindAccountNow()
         return
       }
+      // 面板：tab / 分段开关 / 归零。它们都不带 data-row，必须排在 data-row 分支之前
+      var tab = e.target.getAttribute && e.target.getAttribute('data-tab')
+      if (tab) {
+        setTab(tab)
+        return
+      }
+      var segEl = e.target.closest ? e.target.closest('[data-seg]') : null
+      var seg = segEl && segEl.getAttribute('data-seg')
+      if (seg) {
+        var segVal = segEl.getAttribute('data-val')
+        if (seg === 'posemode') {
+        // 选中站/坐就一直保持（持久化）；「跟随」交还宿主状态
+        cfg.poseMode = segVal === 'stand' || segVal === 'sit' ? segVal : 'auto'
+        if (cfg.poseMode !== 'auto') {
+          poseSet = cfg.poseMode
+          cfg.poseSet = poseSet
+        }
+        forcedSitNow = -1 // 从当前实际姿态开始过渡
+      } else if (seg === 'pose') {
+        poseSet = segVal === 'sit' ? 'sit' : 'stand'
+        cfg.poseSet = poseSet
+      } else if (seg === 'kbstyle') cfg.keyboard.style = segVal === 'simple' ? 'simple' : 'detail'
+        syncCfgDerived()
+        cfgChanged()
+        syncPanel()
+        scheduleFrame() // 站/坐预览立刻生效
+        return
+      }
+      var zero = e.target.getAttribute && e.target.getAttribute('data-cfg-zero')
+      if (zero) {
+        if (zero === 'rot') cfg.rot = { x: 0, y: 0, z: 0 }
+        else if (zero === 'track') {
+          cfg.sensX = 100
+          cfg.sensY = 100
+          cfg.centerX = 0
+          cfg.centerY = 0
+        } else if (zero === 'pose') {
+          cfg.pose[poseSet] = zeroRows()
+        }
+        syncCfgDerived()
+        cfgChanged()
+        syncPanel()
+        return
+      }
+      // 滑块本身不参与 click 逻辑（拖动范围值只走 input 事件）
+      if (e.target.tagName === 'INPUT') return
       var bstep = e.target.getAttribute && e.target.getAttribute('data-bstep')
       if (bstep) {
         var next = Math.round((opts.bubScale + Number(bstep) * BUB_STEP) * 10) / 10
@@ -4153,6 +4871,13 @@ return {
       } else if (k === 'cape') {
         opts.cape = !opts.cape
         set(LS.cape, opts.cape ? '1' : '0')
+      } else if (k === 'track') {
+        cfg.track = !cfg.track
+        syncCfgDerived()
+        cfgChanged()
+        syncPanel()
+        scheduleFrame()
+        return
       } else if (k === 'account') {
         var panel = menuEl.querySelector('[data-acct-panel]')
         if (panel) panel.className = 'dshmp-acct' + (panel.className.indexOf('on') >= 0 ? '' : ' on')
@@ -4163,16 +4888,75 @@ return {
         return
       } else if (k === 'reset') {
         fall = null
-        opts.x = -1
-        opts.y = -1
+        opts.pos = null
+        opts.pxPos = null
         root.style.left = ''
         root.style.top = ''
+        root.style.transform = 'none'
         root.style.right = '18px'
         root.style.bottom = '14px'
         set(LS.pos, '')
         closeMenu()
       }
       applyOpts()
+      scheduleFrame()
+    })
+
+    // 滑块：只认 input（拖动过程中连续触发）；不参与 click 委托，避免被 data-row 误命中
+    menuEl.addEventListener('input', function (e) {
+      var el = e.target
+      if (!el || !el.getAttribute) return
+      var key = el.getAttribute('data-cfg')
+      if (key === 'kbcolor') {
+        // 只做预览，落盘放到 change（避免每敲一个字符就重建一堆 solid 纹理）
+        var sw = menuEl.querySelector('[data-swatch]')
+        var rgb = hexToRgb(normColor(el.value, ''))
+        if (sw && rgb) sw.style.background = el.value
+        return
+      }
+      if (key) {
+        setCfgValue(key, Number(el.value))
+        syncCfgDerived()
+        cfgChanged()
+        var label = menuEl.querySelector('[data-cfg-v="' + key + '"]')
+        // 必须走 cfgValue（支持 rot.x 这种点路径）；直接 cfg[key] 会拿到 undefined
+        if (label) label.textContent = (key.indexOf('sens') === 0 ? cfgValue(key) + '%' : cfgValue(key) + '°')
+        scheduleFrame()
+        return
+      }
+      var part = el.getAttribute('data-pose')
+      if (part) {
+        var axis = Number(el.getAttribute('data-axis'))
+        var row = cfg.pose[poseSet]
+        if (!row[part]) row[part] = [0, 0, 0]
+        row[part][axis] = Math.max(-90, Math.min(90, Number(el.value) || 0))
+        var pl = menuEl.querySelector('[data-pose-v="' + part + '"]')
+        if (pl) pl.textContent = row[part][0] + '/' + row[part][1] + '/' + row[part][2]
+        syncCfgDerived()
+        cfgChanged()
+        scheduleFrame()
+      }
+    })
+
+    // 色号文本框：失焦/回车才算数，非法值回退并标红
+    menuEl.addEventListener('change', function (e) {
+      var el = e.target
+      if (!el || !el.getAttribute || el.getAttribute('data-cfg') !== 'kbcolor') return
+      var hex = normColor(el.value, '')
+      if (!hex) {
+        el.value = cfg.keyboard.color
+        el.classList.add('bad')
+        setTimeout(function () {
+          el.classList.remove('bad')
+        }, 900)
+        return
+      }
+      el.classList.remove('bad')
+      el.value = hex
+      cfg.keyboard.color = hex
+      syncCfgDerived()
+      cfgChanged()
+      syncPanel()
       scheduleFrame()
     })
 
@@ -4213,6 +4997,8 @@ return {
     root.style.bottom = 'auto'
     root.style.right = 'auto'
     root.style.top = Math.round(fromTop) + 'px'
+    // 下落走像素：清掉百分比位移，否则纵向会被 (-ry%) 再抬一截
+    root.style.transform = 'none'
     scheduleFrame()
   }
 
@@ -4249,15 +5035,24 @@ return {
     return window.innerHeight - r.bottom < window.innerHeight * BOTTOM_BAND
   }
 
-  /** 把当前位置落盘（opts 与 localStorage 都要写）。 */
+  /** 把当前位置折成窗口内比例落盘（opts 与 localStorage 都写），然后换回「百分比 + 位移」。 */
   function persistPos() {
+    // 摆好位之后视口又变了：说明手里的 rect 是按旧尺寸摆的，与当前视口不是一套坐标。
+    // 这时候折比例只会写歪（全屏动画里 resize 先报一次就会这样，症状是「切回全屏后停在中间」），
+    // 所以直接用旧比例重摆一次，不覆盖它。
+    if (layoutStamp && (layoutStamp.vw !== window.innerWidth || layoutStamp.vh !== window.innerHeight)) {
+      layoutPos()
+      if (opts.pos) return
+    }
+    var box = posBox()
     var r = root.getBoundingClientRect()
-    var x = Math.round(r.left)
-    var y = Math.round(r.top)
-    // opts 也要同步：applyOpts()（改缩放等）会拿 opts.x/y 重设位置，只写 localStorage 会被它拽回去
-    opts.x = x
-    opts.y = y
-    set(LS.pos, x + ',' + y)
+    opts.pos = { x: clamp01(r.left / box.maxX), y: clamp01(r.top / box.maxY) }
+    opts.pxPos = null
+    // opts 也要同步：改缩放、resize 都靠它重算，只写 localStorage 会被拽回去
+    set(LS.pos, opts.pos.x.toFixed(4) + ',' + opts.pos.y.toFixed(4))
+    notePos('persist')
+    // 落盘后立刻从像素切回百分比定位：之后再怎么改窗口都由 CSS 自己跟
+    layoutPos()
   }
 
   function endFall() {
@@ -4281,6 +5076,8 @@ return {
     fall = null
     var r = root.getBoundingClientRect()
     drag = { dx: e.clientX - r.left, dy: e.clientY - r.top, moved: false }
+    // 拖动写的是当前视口的像素：把 stamp 对齐到此刻，松手折算比例时才不会被当成「视口变过」
+    layoutStamp = { vw: window.innerWidth, vh: window.innerHeight }
     root.className = root.className + ' is-drag'
     try {
       stage.setPointerCapture(e.pointerId)
@@ -4327,7 +5124,7 @@ return {
     document.addEventListener(
       'pointerdown',
       function (e) {
-        if (menuEl && menuEl.className.indexOf('on') >= 0 && !menuEl.contains(e.target)) closeMenu()
+        if (menuOpen && !menuEl.contains(e.target)) closeMenu()
       },
       true
     )
@@ -4356,12 +5153,21 @@ return {
           root.style.top = y + 'px'
           root.style.right = 'auto'
           root.style.bottom = 'auto'
+          // 拖动期间用像素直接摆，先把百分比位移清掉，否则会再叠一层 (-rx%, -ry%) 的偏移
+          root.style.transform = 'none'
+          // 拖动过程中像素是跟着光标在当前视口里算的，stamp 跟着走
+          layoutStamp = { vw: window.innerWidth, vh: window.innerHeight }
+          viewportSeen.w = layoutStamp.vw
+          viewportSeen.h = layoutStamp.vh
           drag.moved = true
           scheduleFrame()
           return
         }
         // 头部跟随：把光标换算到画布坐标系
         if (!eng) return
+        // 鼠标在面板上（滑块/按钮）时不该扭头：既看着怪，又会每帧把 60fps 拉起来。
+        // 这里只是「跳过更新」，不要把 cursor 置 null —— 那会触发 _trackHead 的硬复位。
+        if (menuOpen && inUi(e.target)) return
         var r = canvas.getBoundingClientRect()
         if (!r.width || !r.height) return
         var cx = ((e.clientX - r.left) / r.width) * W
@@ -4450,17 +5256,18 @@ return {
       true
     )
 
+    // 全屏↔窗口化、改窗口大小：位置按比例重算，人物才停在窗口的同一相对位置
+    // （旧版存绝对像素，全屏切回窗口时会被裁到边上、再切回去就停在中间）
     window.addEventListener('resize', function () {
-      if (fall) fall.floor = floorTop()
-      applyBubble()
-      if (opts.x >= 0 && opts.y >= 0) {
-        var r = root.getBoundingClientRect()
-        if (r.right > window.innerWidth || r.bottom > window.innerHeight) {
-          root.style.left = Math.max(0, Math.min(window.innerWidth - r.width, r.left)) + 'px'
-          root.style.top = Math.max(0, Math.min(window.innerHeight - r.height, r.top)) + 'px'
-        }
-      }
+      checkViewport()
       scheduleFrame()
+      // 系统动画期间 resize 可能先报一次旧尺寸、之后尺寸才定；补一拍兜住这种情况。
+      // 真正保底的是 tick 里的 checkViewport()：它只认「innerWidth/innerHeight 真的变了」。
+      clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(function () {
+        checkViewport()
+        scheduleFrame()
+      }, 160)
     })
 
     // 自检钩子：headless 探针读这里，不依赖任何 UI
@@ -4500,6 +5307,29 @@ return {
         deco: opts.deco,
         scale: opts.scale,
         flip: opts.flip,
+        // 位置存的是窗口内比例（0..1）；px 是当前换算出来的像素，resize 前后比一下就知道跟没跟住
+        posVer: POS_VER,
+        // 设置面板：配置原样 + 是否真的走到了自定义骨架（排障时先看这两个）
+        cfgVer: CFG_VER,
+        cfg: cfg,
+        customActive: hasCustom(),
+        panel: { open: menuOpen, tab: panelTab, poseSet: poseSet, poseMode: cfg ? cfg.poseMode : 'auto' },
+        pos: opts.pos ? { x: +opts.pos.x.toFixed(4), y: +opts.pos.y.toFixed(4) } : null,
+        posLog: posLog.slice(),
+        posPx: (function () {
+          if (!root) return null
+          var r = root.getBoundingClientRect()
+          return {
+            left: Math.round(r.left),
+            top: Math.round(r.top),
+            vw: window.innerWidth,
+            vh: window.innerHeight,
+            seenW: viewportSeen.w,
+            seenH: viewportSeen.h,
+            // false = 当前像素不是按现在的视口算的（正常情况下 tick 会在一帧内纠正）
+            stamped: !!layoutStamp && layoutStamp.vw === window.innerWidth && layoutStamp.vh === window.innerHeight,
+          }
+        })(),
         frames: painted,
         fps: fps,
         error: paintError || window.__dshPetError || '',

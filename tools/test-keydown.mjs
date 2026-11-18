@@ -103,11 +103,12 @@ try {
   const fn = new Function(
     'window', 'document', 'performance', 'localStorage', 'requestAnimationFrame',
     'cancelAnimationFrame', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
-    'MutationObserver', 'Image', 'fetch', 'console',
+    'MutationObserver', 'Image', 'fetch', 'console', 'location',
     code + '\nreturn { test: window.__test, PET: DSH_PET }'
   )
   out = fn(win, doc, perf, ls, rAF, noop, noop, noop, noop, noop,
-    function () { return { observe() {}, disconnect() {} } }, ImageStub, fetchStub, console)
+    function () { return { observe() {}, disconnect() {} } }, ImageStub, fetchStub, console,
+    { search: '' })
   win.DSH_PET = out.PET
 } catch (err) {
   check('挂件脚本能在受控环境里求值', false, err.message)

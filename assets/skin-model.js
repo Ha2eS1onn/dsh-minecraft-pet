@@ -96,6 +96,82 @@ function bodySpace(p) {
 
 /** 供动效层复用的空间矩阵（M3 的头部跟随与打字需要求肩点/脖子位置）。 */
 export { baseBody, torsoSpace, bodySpace }
+
+/** 自定义姿态的六个部位（顺序与配置对象一致）。 */
+const CUSTOM_ROWS = ['head', 'body', 'leftArm', 'rightArm', 'leftLeg', 'rightLeg']
+
+/** 一行 [x,y,z] 度 → 四元数；全零（或缺省）返回 null，让调用方走「零开销」分支。 */
+function rowQuat(row) {
+  if (!row) return null
+  const x = Number(row[0]) || 0
+  const y = Number(row[1]) || 0
+  const z = Number(row[2]) || 0
+  if (!x && !y && !z) return null
+  return Q.fromDegrees(x, y, z)
+}
+
+/**
+ * 把「站姿/坐姿两套自定义角度」折算成一组可复用的矩阵。
+ *
+ * - 每部位按 `sit` 在站/坐两套之间 slerp，所以进出坐姿是连续过渡，不会硬跳。
+ * - 全零 → 返回 **null**（不是单位矩阵）：`buildParts` 见到 null 时完全跳过乘法，
+ *   静止帧才能与基线逐像素一致（`c2c43ab4`）。
+ * - `rot` 是整体角度：绕 y=15（模型中心）转，与 MDP `model_transform` 一致。
+ *
+ * @param {object} cfg 配置对象（只读 `cfg.pose` 与 `cfg.rot`）
+ * @param {number} sit 0..1 坐姿混合量
+ * @returns {null | {body, head, arms, legs, rot, bodyQ, rotQ}}
+ */
+export function customRig(cfg, sit) {
+  if (!cfg || !cfg.pose) return null
+  const stand = cfg.pose.stand || {}
+  const seated = cfg.pose.sit || {}
+  const t = Math.max(0, Math.min(1, Number(sit) || 0))
+  const rig = { body: null, head: null, arms: [null, null], legs: [null, null], rot: null, bodyQ: null, rotQ: null }
+  let any = false
+
+  const blend = (entry) => {
+    const a = rowQuat(stand[entry])
+    const b = rowQuat(seated[entry])
+    if (!a && !b) return null
+    if (!a) return t >= 1 ? b : (t <= 0 ? null : Q.slerp(Q.identity(), b, t))
+    if (!b) return t <= 0 ? a : (t >= 1 ? null : Q.slerp(a, Q.identity(), t))
+    if (t <= 0) return a
+    if (t >= 1) return b
+    return Q.slerp(a, b, t)
+  }
+
+  for (const entry of CUSTOM_ROWS) {
+    const q = blend(entry)
+    if (!q) continue
+    any = true
+    const m = Q.toMatrix(q)
+    if (entry === 'body') { rig.body = m; rig.bodyQ = q }
+    else if (entry === 'head') rig.head = m
+    else if (entry === 'leftArm') rig.arms[0] = m
+    else if (entry === 'rightArm') rig.arms[1] = m
+    else if (entry === 'leftLeg') rig.legs[0] = m
+    else if (entry === 'rightLeg') rig.legs[1] = m
+  }
+
+  const rot = cfg.rot
+  if (rot) {
+    const rx = Number(rot.x) || 0
+    const ry = Number(rot.y) || 0
+    const rz = Number(rot.z) || 0
+    if (rx || ry || rz) {
+      const q = Q.fromDegrees(rx, ry, rz)
+      rig.rotQ = q
+      rig.rot = multiply(multiply(translate(0, 15, 0), Q.toMatrix(q)), translate(0, -15, 0))
+      any = true
+    }
+  }
+  if (!any) return null
+  if (!rig.bodyQ) rig.bodyQ = Q.identity()
+  if (!rig.rotQ) rig.rotQ = Q.identity()
+  return rig
+}
+
 /** 压缩形变系数：`tools/bench-physics.mjs` 用它把 squash 换算成像素位移。 */
 export const SQUASH_SHAPE = { y: SQUASH_Y, xz: SQUASH_XZ, height: 32 }
 
@@ -103,17 +179,23 @@ export const SQUASH_SHAPE = { y: SQUASH_Y, xz: SQUASH_XZ, height: 32 }
  * 骨架构建。
  * @param {object} pose 见 defaultPose()
  * @param {{legacy?: boolean, eyes?: object}} skin legacy 标记 + 识别格眼睛
- * @param {{outer?: boolean, armWidth?: number, keyboard?: boolean, keycaps?: boolean}} opts
- *   armWidth=3 即 slim；keyboard=false 可关掉坐姿键盘
+ * @param {{outer?: boolean, armWidth?: number, keyboard?: boolean, keycaps?: boolean,
+ *          cape?: object, custom?: object, keyboardColor?: number[]}} opts
+ *   armWidth=3 即 slim；keyboard=false 可关掉坐姿键盘；
+ *   custom 是 `customRig()` 的返回值（null 时不做任何额外乘法，保证基线逐像素不变）；
+ *   keyboardColor 是键盘盒 RGB（null 时用内置常量，键帽自动取 0.78 暗一档）
  */
 export function buildParts(
   pose,
   skin,
-  { outer = true, armWidth = 4, keyboard: keyboardOn = true, keycaps = true, cape = null } = {},
+  { outer = true, armWidth = 4, keyboard: keyboardOn = true, keycaps = true, cape = null, custom = null, keyboardColor = null } = {},
 ) {
   const p = pose || defaultPose()
   const legacy = !!skin?.legacy
   const parts = []
+  // 自定义偏移：off 为 null 时**原样返回**，不引入任何多余乘法（否则末位会漂、基线哈希变）
+  const C = custom
+  const mul = (m, off) => (off ? multiply(m, off) : m)
 
   const add = (key, size, uv, transform, mirror = false) => {
     parts.push({ key, size, uv, transform, inflate: 0, mirror })
@@ -124,21 +206,20 @@ export function buildParts(
   }
 
   // 躯干
-  add('body', [8, 12, 4], [16, 16], multiply(bodySpace(p), translate(0, 6, 0)))
+  add('body', [8, 12, 4], [16, 16], multiply(mul(bodySpace(p), C && C.body), translate(0, 6, 0)))
 
-  // 头：torso_space · T(0,12,0) · headRot · T(0,4,0)
+  // 头：torso_space · [custom body] · T(0,12,0) · [custom head] · headRot · T(0,4,0)
   const headRot = p.head_rotation ? Q.toMatrix(p.head_rotation) : IDENTITY_MAT
-  const headTransform = multiply(
-    multiply(multiply(torsoSpace(p), translate(0, 12, 0)), headRot),
-    translate(0, 4, 0),
-  )
+  const headBase = mul(mul(torsoSpace(p), C && C.body), translate(0, 12, 0))
+  const headTransform = multiply(multiply(mul(headBase, C && C.head), headRot), translate(0, 4, 0))
   add('head', [8, 8, 8], [0, 0], headTransform)
 
-  // 手臂：torso_space · Ry(body_yaw) · T(肩) · armRot · T(0,-4,0)
+  // 手臂：torso_space · Ry(body_yaw) · [custom body] · T(肩) · armRot · [custom arm] · T(0,-4,0)
   for (const left of [false, true]) {
     const side = left ? 0 : 1
     const sign = left ? 1 : -1
     const armRot = p.arms?.[side] ? Q.toMatrix(p.arms[side]) : IDENTITY_MAT
+    const armBase = mul(mul(torsoSpace(p), Q.toMatrix(Q.rotY(p.body_yaw))), C && C.body)
     add(
       left ? 'leftArm' : 'rightArm',
       [armWidth, 12, 4],
@@ -146,10 +227,10 @@ export function buildParts(
       multiply(
         multiply(
           multiply(
-            multiply(torsoSpace(p), Q.toMatrix(Q.rotY(p.body_yaw))),
+            armBase,
             translate(sign * (4 + armWidth / 2) + p.arm_slide, 10 + sign * p.arm_bob, 0),
           ),
-          armRot,
+          mul(armRot, C && C.arms[side]),
         ),
         translate(0, -4, 0),
       ),
@@ -177,7 +258,7 @@ export function buildParts(
             multiply(baseBody(p), translate(sign * (2 + 0.25 * p.sit) + p.leg_slide, 0, 0)),
             Q.toMatrix(Q.rotZ(p.leg_roll)),
           ),
-          Q.toMatrix(legQ),
+          mul(Q.toMatrix(legQ), C && C.legs[side]),
         ),
         translate(0, -6, 0),
       ),
@@ -199,7 +280,7 @@ export function buildParts(
       size: [10, 16, 1],
       uv: [0, 0],
       transform: multiply(
-        multiply(bodySpace(p), translate(0, 3.6, -2.9)),
+        multiply(mul(bodySpace(p), C && C.body), translate(0, 3.6, -2.9)),
         Q.toMatrix(Q.rotX(0.14)),
       ),
       inflate: 0,
@@ -273,6 +354,9 @@ export function buildParts(
     const SX = 19.6
     const SY = 0.65
     const SZ = 7.8
+    // 自定义色号：键盘用原色，键帽按 MDP 的 0.78 压暗；没设色号时走内置常量（默认画面不变）
+    const kbColor = keyboardColor || KEYBOARD_COLOR
+    const capColor = keyboardColor ? keyboardColor.map((v) => Math.round(v * 0.78)) : KEYCAP_COLOR
     const keyboard = multiply(
       multiply(translate(0, 10.2, 9.4), scale(p.sit, p.sit, p.sit)),
       translate(0, -0.3, 0),
@@ -285,7 +369,7 @@ export function buildParts(
       transform: keyboard,
       inflate: 0,
       mirror: false,
-      solid: KEYBOARD_COLOR,
+      solid: kbColor,
     })
     // 键帽：MDP 在顶面按 3 行 × 5 列判定 `is_key`（render.rs:2162-2174）把键位画暗；
     // 这里做成立体小方块，观感一致且完全复用 drawBox。
@@ -303,10 +387,20 @@ export function buildParts(
             transform: multiply(keyboard, translate(gx, SY / 2 + 0.03, gz)),
             inflate: 0,
             mirror: false,
-            solid: KEYCAP_COLOR,
+            solid: capColor,
           })
         }
       }
+    }
+  }
+
+  // 整体角度偏移（视线与角度面板）：绕模型中心 y=15 转，**最后**左乘到全部 part，
+  // 键盘/键帽也一起吃 —— 否则手（按模型空间键位反解）会脱键、浮现字挂点也会偏。
+  // 必须在 squash / shake 之后：压缩轴要跟着身体走，抖动是绝对位移。
+  if (C && C.rot) {
+    for (const part of parts) {
+      if (part.kind === 'quad') part.pos = part.pos.map((v) => transformPoint(C.rot, v))
+      else part.transform = multiply(C.rot, part.transform)
     }
   }
 

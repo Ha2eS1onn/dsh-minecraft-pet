@@ -4,7 +4,7 @@
 // 所有动效都是「时间的纯函数 + 少量积分状态」，与 MDP 一致：
 // 没有速度/加速度，只有 breathing_weight 那一个指数衰减量。
 
-import { project, transformPoint } from './skin-render.js'
+import { project, transformPoint, multiply } from './skin-render.js'
 import { torsoSpace, bodySpace } from './skin-model.js'
 import { GestureScheduler } from './gestures.js'
 import { Spring } from './spring.js'
@@ -59,6 +59,9 @@ export const DEFAULT_ANIM = {
   sensY: 1,
   rangeX: 45,
   rangeY: 30,
+  /** 头部朝向的中心偏移（度）：在灵敏度换算之后、范围夹取之前叠加，默认 0 与旧行为一致。 */
+  centerX: 0,
+  centerY: 0,
   /** P2-a v2 物理：打字压缩回弹 / 落地回弹 / 转头惯性。
    *  关掉必须与 P1 逐像素一致（转头退回 trackW 指数平滑、squash 恒为 0）。 */
   physics: true,
@@ -328,22 +331,23 @@ export class PetAnimator {
     const H = ctx.height
     // 光标离开画布时按画面中上区域算目标，保证权重衰减期间角度是「收回中立」而不是乱指
     const cur = ctx.cursor || { x: W / 2, y: H * 0.36 }
-    const neck = transformPoint(torsoSpace(p), [0, 12, 0])
+    const rig = ctx.customRig || null
+    // 脖子点：自定义躯干偏移与整体旋转都要参与，否则大角度偏转时「转头量」与画面错位
+    let neckLocal = [0, 12, 0]
+    if (rig && rig.body) neckLocal = transformPoint(rig.body, neckLocal)
+    let neck = transformPoint(torsoSpace(p), neckLocal)
+    if (rig && rig.rot) neck = transformPoint(rig.rot, neck)
     const ahead = Q.rotate(VIEW, [0, 3, 0])
     const pt = project([neck[0] + ahead[0], neck[1] + ahead[1], neck[2] + ahead[2]], W, H)
 
     const dx = (cur.x - pt[0]) / Math.max(W * 0.8, 200)
     const dy = (cur.y - pt[1]) / Math.max(H * 0.65, 180)
-    const x = clamp(
-      Math.atan(dx * 0.3 * s.sensX),
-      -s.rangeX * DEG,
-      s.rangeX * DEG,
-    )
-    const y = clamp(
-      Math.atan(dy * 0.95 * s.sensY),
-      -s.rangeY * DEG,
-      s.rangeY * DEG,
-    )
+    let x = Math.atan(dx * 0.3 * s.sensX)
+    if (s.centerX) x += s.centerX * DEG
+    let y = Math.atan(dy * 0.95 * s.sensY)
+    if (s.centerY) y += s.centerY * DEG
+    x = clamp(x, -s.rangeX * DEG, s.rangeX * DEG)
+    y = clamp(y, -s.rangeY * DEG, s.rangeY * DEG)
     // 权重乘在目标角上：want=0 时目标是严格中立，与状态姿态的 head_rotation 一致
     const wantH = clamp(x, -Math.PI / 2, Math.PI / 2) * want
     const wantV = clamp(y, -85 * DEG, 85 * DEG) * want
@@ -358,8 +362,10 @@ export class PetAnimator {
       Q.rotX(p.head_nod),
     )
     // parent 只取躯干自身的旋转；MDP 里是 model_rotation × crouch 倾斜 × 自定义姿态。
-    // 我们的 torsoSpace 只叠了 body_pitch，其余都是平移。
-    const parent = Q.rotX(p.body_pitch)
+    // 我们的 torsoSpace 只叠了 body_pitch，其余都是平移；自定义躯干/整体角度接在它外面。
+    let parent = Q.rotX(p.body_pitch)
+    if (rig && rig.body) parent = Q.multiply(parent, rig.bodyQ)
+    if (rig && rig.rot) parent = Q.multiply(rig.rotQ, parent)
     const tracked = Q.multiply(Q.conjugate(parent), desired)
     // 权重满时与 P1 逐位一致；权重衰减时朝「状态姿态自带的角度」过渡，
     // 状态切换本身还有 180ms 的 slerp 在跑，两者叠起来是一条连续曲线。
@@ -382,7 +388,9 @@ export class PetAnimator {
       this._resetTyping()
       return
     }
-    const body = bodySpace(p)
+    // 自定义躯干角度要进肩点与方向反解，否则身体一转手就够不到键盘（键盘在模型空间不动）
+    const rig = ctx.customRig || null
+    const body = rig && rig.body ? multiply(bodySpace(p), rig.body) : bodySpace(p)
     const aw = ctx.armWidth || 4
     const d = Math.max(dt, 0)
 
